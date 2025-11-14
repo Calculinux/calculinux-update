@@ -31,6 +31,9 @@ calculinux-update = "calculinux_update.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/calculinux_update"]
+include = [
+  "src/calculinux_update/defaults/calculinux-update.toml",
+]
 
 [tool.ruff]
 line-length = 100

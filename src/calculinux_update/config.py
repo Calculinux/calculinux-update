@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from importlib import resources
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,14 +84,22 @@ def candidate_config_paths(explicit: Optional[Path] = None) -> List[Path]:
 def load_config(explicit: Optional[Path] = None) -> UpdateConfig:
     """Load configuration from the first existing candidate path."""
 
-    for path in candidate_config_paths(explicit):
+    candidates = candidate_config_paths(explicit)
+
+    for path in candidates:
         if path.is_file():
             with path.open("rb") as fh:
                 data = tomllib.load(fh)
             return parse_config(data, path)
+
+    packaged = _load_packaged_default()
+    if packaged:
+        return packaged
+
     raise FileNotFoundError(
-        "No calculinux-update config found. Checked: "
-        + ", ".join(str(p) for p in candidate_config_paths(explicit))
+    "No calculinux-update config found. Checked: "
+    + ", ".join(str(p) for p in candidates)
+        + " and bundled default"
     )
 
 
@@ -128,3 +137,19 @@ def parse_config(data: dict, source: Path) -> UpdateConfig:
         machine=data.get("machine"),
         channels=channels,
     )
+
+
+def _load_packaged_default() -> Optional[UpdateConfig]:
+    try:
+        resource = resources.files("calculinux_update").joinpath(
+            "defaults", DEFAULT_CONFIG_NAME
+        )
+    except ModuleNotFoundError:  # pragma: no cover - depends on packaging
+        return None
+
+    if not resource.is_file():
+        return None
+
+    with resource.open("rb") as fh:
+        data = tomllib.load(fh)
+    return parse_config(data, Path(f"package://{DEFAULT_CONFIG_NAME}"))

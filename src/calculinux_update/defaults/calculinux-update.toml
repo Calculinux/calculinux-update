@@ -1,0 +1,11 @@
+mirror_base_url = "https://opkg.calculinux.org"
+machine = "luckfox-lyra"
+download_dir = "/var/tmp/calculinux-update"
+
+[[channels]]
+name = "Luckfox Lyra Continuous"
+path = "/update/luckfox-lyra/continuous"
+
+[[channels]]
+name = "Luckfox Lyra Release"
+path = "/update/luckfox-lyra/release"
