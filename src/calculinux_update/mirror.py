@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Iterable, List, Optional
-import logging
+
 import httpx
 
 from .config import ChannelConfig, UpdateConfig
@@ -80,7 +81,8 @@ class MirrorClient:
                 last_modified_header = head.headers.get("Last-Modified")
                 if last_modified_header:
                     try:
-                        last_modified = httpx.Headers({"Last-Modified": last_modified_header}).get_datetime("Last-Modified")
+                        headers = httpx.Headers({"Last-Modified": last_modified_header})
+                        last_modified = headers.get_datetime("Last-Modified")
                     except Exception:  # pragma: no cover - fallback
                         LOGGER.debug("Failed to parse Last-Modified header for %s", bundle_url)
             bundles.append(

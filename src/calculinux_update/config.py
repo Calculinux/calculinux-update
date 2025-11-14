@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
-import os
-import tomllib
 
 ENV_VAR = "CALCULINUX_UPDATE_CONFIG"
 DEFAULT_CONFIG_NAME = "calculinux-update.toml"

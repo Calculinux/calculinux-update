@@ -72,8 +72,18 @@ def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> Bundl
 
 @app.command()
 def list(
-    channel: Optional[str] = typer.Option(None, "-c", "--channel", help="Channel name or path"),
-    config_path: Optional[Path] = typer.Option(None, exists=True, resolve_path=True, help="Explicit config path"),
+    channel: Optional[str] = typer.Option(
+        None,
+        "-c",
+        "--channel",
+        help="Channel name or path",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        exists=True,
+        resolve_path=True,
+        help="Explicit config path",
+    ),
 ):
     """List available bundles."""
 
@@ -89,9 +99,24 @@ def list(
 
 @app.command()
 def download(
-    channel: Optional[str] = typer.Option(None, "-c", "--channel", help="Channel name or path"),
-    bundle_name: Optional[str] = typer.Option(None, "-b", "--bundle", help="Bundle filename (substring match)"),
-    config_path: Optional[Path] = typer.Option(None, exists=True, resolve_path=True, help="Explicit config path"),
+    channel: Optional[str] = typer.Option(
+        None,
+        "-c",
+        "--channel",
+        help="Channel name or path",
+    ),
+    bundle_name: Optional[str] = typer.Option(
+        None,
+        "-b",
+        "--bundle",
+        help="Bundle filename (substring match)",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        exists=True,
+        resolve_path=True,
+        help="Explicit config path",
+    ),
 ):
     """Download a bundle to the configured directory."""
 
@@ -105,19 +130,39 @@ def download(
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)
     result = installer.download(bundle)
-    console.print(
-        f"[green]Downloaded[/] {result.bundle.name} → {result.path} (sha256 {result.sha256[:12]}...)"
+    message = (
+        "[green]Downloaded[/] "
+        f"{result.bundle.name} → {result.path} (sha256 {result.sha256[:12]}...)"
     )
+    console.print(message)
 
 
 @app.command()
 def install(
-    channel: Optional[str] = typer.Option(None, "-c", "--channel", help="Channel name or path"),
-    bundle_name: Optional[str] = typer.Option(None, "-b", "--bundle", help="Bundle filename (substring match)"),
-    config_path: Optional[Path] = typer.Option(None, exists=True, resolve_path=True, help="Explicit config path"),
+    channel: Optional[str] = typer.Option(
+        None,
+        "-c",
+        "--channel",
+        help="Channel name or path",
+    ),
+    bundle_name: Optional[str] = typer.Option(
+        None,
+        "-b",
+        "--bundle",
+        help="Bundle filename (substring match)",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        exists=True,
+        resolve_path=True,
+        help="Explicit config path",
+    ),
     rauc_binary: str = typer.Option("rauc", help="Path to rauc binary"),
     dry_run: bool = typer.Option(False, help="Download but skip rauc install"),
-    sudo: bool = typer.Option(True, help="Prefix install command with sudo when not already root"),
+    sudo: bool = typer.Option(
+        True,
+        help="Prefix install command with sudo when not already root",
+    ),
 ):
     """Download and install a bundle via RAUC."""
 
@@ -133,9 +178,7 @@ def install(
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)
     result = installer.download(bundle)
-    console.print(
-        f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})"
-    )
+    console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
     confirm = typer.confirm("Proceed with rauc install?", default=not dry_run)
     if not confirm:
         console.print("[yellow]Installation skipped[/]")

@@ -36,7 +36,12 @@ class UpdateInstaller:
         dest_path = self.config.download_dir / bundle.name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with httpx.stream("GET", bundle.url, timeout=self._timeout, follow_redirects=True) as response:
+        with httpx.stream(
+            "GET",
+            bundle.url,
+            timeout=self._timeout,
+            follow_redirects=True,
+        ) as response:
             response.raise_for_status()
             total = int(response.headers.get("Content-Length", 0)) or bundle.size_bytes or 0
             hasher = hashlib.sha256()
@@ -56,9 +61,18 @@ class UpdateInstaller:
 
         return DownloadResult(bundle=bundle, path=dest_path, sha256=hasher.hexdigest())
 
-    def run_rauc_install(self, bundle_path: Path, *, rauc_binary: str = "rauc", sudo: bool = False, dry_run: bool = False) -> None:
+    def run_rauc_install(
+        self,
+        bundle_path: Path,
+        *,
+        rauc_binary: str = "rauc",
+        sudo: bool = False,
+        dry_run: bool = False,
+    ) -> None:
         if dry_run:
-            console.print(f"[yellow]Dry run:[/] would execute '{rauc_binary} install {bundle_path}'")
+            console.print(
+                f"[yellow]Dry run:[/] would execute '{rauc_binary} install {bundle_path}'"
+            )
             return
 
         if sudo and os.geteuid() != 0:

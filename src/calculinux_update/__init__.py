@@ -1,8 +1,8 @@
 """Calculinux update frontend package."""
 
-from .config import load_config, UpdateConfig
-from .mirror import MirrorClient, BundleInfo
+from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
+from .mirror import BundleInfo, MirrorClient
 
 __all__ = [
     "load_config",
