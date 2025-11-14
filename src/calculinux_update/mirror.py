@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Iterable, List, Optional
 
@@ -81,9 +82,8 @@ class MirrorClient:
                 last_modified_header = head.headers.get("Last-Modified")
                 if last_modified_header:
                     try:
-                        headers = httpx.Headers({"Last-Modified": last_modified_header})
-                        last_modified = headers.get_datetime("Last-Modified")
-                    except Exception:  # pragma: no cover - fallback
+                        last_modified = parsedate_to_datetime(last_modified_header)
+                    except (TypeError, ValueError):  # pragma: no cover - fallback
                         LOGGER.debug("Failed to parse Last-Modified header for %s", bundle_url)
             bundles.append(
                 BundleInfo(
