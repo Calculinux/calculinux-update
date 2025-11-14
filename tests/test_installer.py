@@ -1,7 +1,10 @@
+import hashlib
+
+import httpx
 import pytest
 
 from calculinux_update.config import ChannelConfig, UpdateConfig
-from calculinux_update.installer import UpdateInstaller
+from calculinux_update.installer import ChecksumMismatchError, UpdateInstaller
 from calculinux_update.mirror import BundleInfo
 
 
@@ -13,7 +16,7 @@ def installer(tmp_path):
         machine="luckfox",
         channels=[ChannelConfig(name="Test", path="/update/test")],
     )
-    return UpdateInstaller(config)
+    return UpdateInstaller(config, max_attempts=1)
 
 
 def dummy_bundle(channel):
@@ -59,3 +62,96 @@ def test_run_rauc_install_invokes_subprocess(installer, monkeypatch):
 
     installer.run_rauc_install(path, sudo=True)
     assert calls and calls[0][0] == "sudo"
+
+
+class StreamStub:
+    def __init__(self, data: bytes, headers: dict | None = None):
+        self._data = data
+        self.headers = headers or {"Content-Length": str(len(data))}
+        self.status_code = 200
+
+    def __enter__(self):  # pragma: no cover - trivial
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # pragma: no cover - trivial
+        return False
+
+    def iter_bytes(self):
+        yield self._data
+
+    def raise_for_status(self):  # pragma: no cover - trivial
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("error", request=None, response=None)
+
+
+def test_download_streams_and_validates_checksum(monkeypatch, installer):
+    data = b"abc123"
+    expected = hashlib.sha256(data).hexdigest()
+
+    monkeypatch.setattr(
+        "calculinux_update.installer.httpx.stream",
+        lambda *_args, **_kwargs: StreamStub(data),
+    )
+
+    bundle = dummy_bundle(installer.config.channels[0])
+    result = installer.download(bundle, expected_sha256=expected)
+
+    assert result.sha256 == expected
+    assert result.path.exists()
+
+
+def test_download_reuses_existing_file(monkeypatch, installer):
+    bundle = dummy_bundle(installer.config.channels[0])
+    path = installer.config.download_dir / bundle.name
+    data = b"cached"
+    expected = hashlib.sha256(data).hexdigest()
+    path.write_bytes(data)
+
+    def fail_stream(*_args, **_kwargs):
+        raise AssertionError("network should not be used")
+
+    monkeypatch.setattr("calculinux_update.installer.httpx.stream", fail_stream)
+
+    result = installer.download(bundle, expected_sha256=expected)
+    assert result.path == path
+
+
+def test_download_raises_on_checksum_mismatch(monkeypatch, installer):
+    data = b"abc"
+    monkeypatch.setattr(
+        "calculinux_update.installer.httpx.stream",
+        lambda *_args, **_kwargs: StreamStub(data),
+    )
+
+    bundle = dummy_bundle(installer.config.channels[0])
+    with pytest.raises(ChecksumMismatchError):
+        installer.download(bundle, expected_sha256="deadbeef")
+
+
+def test_download_resume_uses_range_header(monkeypatch, tmp_path):
+    config = UpdateConfig(
+        mirror_base_url="https://example.com",
+        download_dir=tmp_path,
+        machine="luckfox",
+        channels=[ChannelConfig(name="Test", path="/update/test")],
+    )
+    installer = UpdateInstaller(config, resume_downloads=True, max_attempts=1)
+    bundle = dummy_bundle(config.channels[0])
+    partial = installer.config.download_dir / (bundle.name + ".part")
+    partial.write_bytes(b"abc")
+
+    headers_seen = {}
+
+    class RangeStream(StreamStub):
+        def __init__(self, data: bytes):
+            super().__init__(data, headers={"Content-Length": str(len(data))})
+
+    def fake_stream(method, url, *, headers=None, **kwargs):
+        headers_seen.update(headers or {})
+        return RangeStream(b"def")
+
+    monkeypatch.setattr("calculinux_update.installer.httpx.stream", fake_stream)
+
+    result = installer.download(bundle, expected_sha256=None)
+    assert headers_seen.get("Range") == "bytes=3-"
+    assert result.path.read_bytes() == b"abcdef"

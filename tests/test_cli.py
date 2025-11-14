@@ -34,8 +34,8 @@ class StubInstaller:
     def ensure_binary_available(binary="rauc"):
         return None
 
-    def download(self, bundle):
-        self.download_calls.append(bundle)
+    def download(self, bundle, *, expected_sha256=None):
+        self.download_calls.append((bundle, expected_sha256))
         return SimpleNamespace(
             bundle=bundle,
             path=self.config.download_dir / bundle.name,
@@ -62,6 +62,7 @@ def build_bundle(config):
         channel=config.channels[0],
         size_bytes=1024,
         last_modified=None,
+        sha256="abcd",
     )
 
 
@@ -94,7 +95,10 @@ def test_cli_download_with_bundle(monkeypatch, tmp_path):
 
     result = runner.invoke(app, ["download", "--bundle", "bundle"])
     assert result.exit_code == 0
-    assert installer.download_calls and installer.download_calls[0].name == "bundle.raucb"
+    assert installer.download_calls
+    bundle_called, expected_sha = installer.download_calls[0]
+    assert bundle_called.name == "bundle.raucb"
+    assert expected_sha == bundle.sha256
 
 
 def test_cli_install_triggers_run(monkeypatch, tmp_path):
@@ -129,3 +133,4 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0
     assert installer.install_calls and installer.install_calls[0][3] is True
+    assert installer.download_calls[0][1] == bundle.sha256

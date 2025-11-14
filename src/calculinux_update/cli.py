@@ -29,6 +29,7 @@ def _bundle_table(bundles: List[BundleInfo], show_index: bool = False) -> Table:
     table.add_column("Channel")
     table.add_column("Size", justify="right")
     table.add_column("Last Modified")
+    table.add_column("SHA256", overflow="fold")
 
     for idx, bundle in enumerate(bundles, start=1):
         table.add_row(
@@ -37,6 +38,7 @@ def _bundle_table(bundles: List[BundleInfo], show_index: bool = False) -> Table:
             bundle.channel.name,
             _format_size(bundle.size_bytes),
             bundle.last_modified.isoformat(timespec="seconds") if bundle.last_modified else "?",
+            (bundle.sha256 or "?")[:12] + "…" if bundle.sha256 else "?",
         )
     return table
 
@@ -129,7 +131,7 @@ def download(
 
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)
-    result = installer.download(bundle)
+    result = installer.download(bundle, expected_sha256=bundle.sha256)
     message = (
         "[green]Downloaded[/] "
         f"{result.bundle.name} → {result.path} (sha256 {result.sha256[:12]}...)"
@@ -177,7 +179,7 @@ def install(
 
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)
-    result = installer.download(bundle)
+    result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
     confirm = typer.confirm("Proceed with rauc install?", default=not dry_run)
     if not confirm:
