@@ -59,37 +59,37 @@ path = "/update/luckfox-lyra/release"
 List bundles (all channels):
 
 ```bash
-calculinux-update list
+cup list
 ```
 
 List only the release channel:
 
 ```bash
-calculinux-update list --channel "Luckfox Lyra Release"
+cup list --channel "Luckfox Lyra Release"
 ```
 
 Install interactively (downloads and prompts for confirmation):
 
 ```bash
-sudo calculinux-update install
+sudo cup install
 ```
 
 Install a specific bundle directly:
 
 ```bash
-sudo calculinux-update install --channel continuous --bundle calculinux-bundle-luckfox-lyra.raucb
+sudo cup install --channel continuous --bundle calculinux-bundle-luckfox-lyra.raucb
 ```
 
 Run non-interactively (skips the confirmation prompt):
 
 ```bash
-sudo calculinux-update install --bundle calculinux-bundle-luckfox-lyra.raucb --yes
+sudo cup install --bundle calculinux-bundle-luckfox-lyra.raucb --yes
 ```
 
 Dry run (download only, skip `rauc install`):
 
 ```bash
-calculinux-update install --dry-run
+cup install --dry-run
 ```
 Dry runs never invoke `rauc`, so the binary does not need to be present on the host.
 

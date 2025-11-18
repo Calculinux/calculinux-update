@@ -27,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-calculinux-update = "calculinux_update.cli:app"
+cup = "calculinux_update.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/calculinux_update"]
