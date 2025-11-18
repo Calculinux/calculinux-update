@@ -107,6 +107,7 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path):
     installer = StubInstaller(config)
 
     monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
     class InstallerFactory:
         @staticmethod
         def ensure_binary_available(*_args, **_kwargs):
@@ -134,3 +135,76 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert installer.install_calls and installer.install_calls[0][3] is True
     assert installer.download_calls[0][1] == bundle.sha256
+
+
+def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+
+    def fail_confirm(*_args, **_kwargs):
+        raise AssertionError("confirm should not run when --yes is provided")
+
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", fail_confirm)
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "--bundle",
+            "bundle",
+            "--dry-run",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0
+
+
+def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            raise AssertionError("should not check binary for dry run")
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "--bundle",
+            "bundle",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0

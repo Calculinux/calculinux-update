@@ -165,11 +165,19 @@ def install(
         True,
         help="Prefix install command with sudo when not already root",
     ),
+    assume_yes: bool = typer.Option(
+        False,
+        "-y",
+        "--yes",
+        "--assume-yes",
+        help="Run non-interactively and skip the confirmation prompt",
+    ),
 ):
     """Download and install a bundle via RAUC."""
 
     config = _load_config(config_path)
-    UpdateInstaller.ensure_binary_available(rauc_binary)
+    if not dry_run:
+        UpdateInstaller.ensure_binary_available(rauc_binary)
 
     with MirrorClient(config) as client:
         bundles = client.list_bundles(channel_selector=channel)
@@ -181,12 +189,21 @@ def install(
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
-    confirm = typer.confirm("Proceed with rauc install?", default=not dry_run)
+
+    confirm = True if assume_yes else typer.confirm(
+        "Proceed with rauc install?",
+        default=not dry_run,
+    )
     if not confirm:
         console.print("[yellow]Installation skipped[/]")
         raise typer.Exit()
 
-    installer.run_rauc_install(result.path, rauc_binary=rauc_binary, sudo=sudo, dry_run=dry_run)
+    installer.run_rauc_install(
+        result.path,
+        rauc_binary=rauc_binary,
+        sudo=sudo,
+        dry_run=dry_run,
+    )
 
 
 if __name__ == "__main__":

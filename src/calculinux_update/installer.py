@@ -103,6 +103,11 @@ class UpdateInstaller:
         ) as response:
             response.raise_for_status()
 
+            if resume_offset and response.status_code != 206:
+                resume_offset = 0
+                with suppress(FileNotFoundError):
+                    tmp_path.unlink()
+
             total = _determine_total_bytes(response, bundle, resume_offset)
             progress_total = total if total else None
             with Progress(

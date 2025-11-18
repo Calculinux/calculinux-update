@@ -14,6 +14,7 @@ A lightweight Python CLI that discovers RAUC update bundles published to the Cal
 - Lists RAUC bundles per channel (continuous, release, etc.).
 - Downloads the selected bundle with a progress bar and checksum validation.
 - Calls `rauc install <bundle>` with optional `--dry-run` to preview actions.
+- Requires each channel to expose an `index.json` manifest; legacy HTML directory scraping has been removed.
 - Designed to be extended with new machines/channels by editing the config file only.
 
 ## Installation
@@ -79,11 +80,18 @@ Install a specific bundle directly:
 sudo calculinux-update install --channel continuous --bundle calculinux-bundle-luckfox-lyra.raucb
 ```
 
+Run non-interactively (skips the confirmation prompt):
+
+```bash
+sudo calculinux-update install --bundle calculinux-bundle-luckfox-lyra.raucb --yes
+```
+
 Dry run (download only, skip `rauc install`):
 
 ```bash
 calculinux-update install --dry-run
 ```
+Dry runs never invoke `rauc`, so the binary does not need to be present on the host.
 
 Environment overrides:
 

@@ -65,10 +65,10 @@ def test_run_rauc_install_invokes_subprocess(installer, monkeypatch):
 
 
 class StreamStub:
-    def __init__(self, data: bytes, headers: dict | None = None):
+    def __init__(self, data: bytes, headers: dict | None = None, *, status_code: int = 200):
         self._data = data
         self.headers = headers or {"Content-Length": str(len(data))}
-        self.status_code = 200
+        self.status_code = status_code
 
     def __enter__(self):  # pragma: no cover - trivial
         return self
@@ -144,7 +144,7 @@ def test_download_resume_uses_range_header(monkeypatch, tmp_path):
 
     class RangeStream(StreamStub):
         def __init__(self, data: bytes):
-            super().__init__(data, headers={"Content-Length": str(len(data))})
+            super().__init__(data, headers={"Content-Length": str(len(data))}, status_code=206)
 
     def fake_stream(method, url, *, headers=None, **kwargs):
         headers_seen.update(headers or {})
@@ -155,3 +155,25 @@ def test_download_resume_uses_range_header(monkeypatch, tmp_path):
     result = installer.download(bundle, expected_sha256=None)
     assert headers_seen.get("Range") == "bytes=3-"
     assert result.path.read_bytes() == b"abcdef"
+
+
+def test_download_restarts_when_range_ignored(monkeypatch, tmp_path):
+    config = UpdateConfig(
+        mirror_base_url="https://example.com",
+        download_dir=tmp_path,
+        machine="luckfox",
+        channels=[ChannelConfig(name="Test", path="/update/test")],
+    )
+    installer = UpdateInstaller(config, resume_downloads=True, max_attempts=1)
+    bundle = dummy_bundle(config.channels[0])
+    partial = installer.config.download_dir / (bundle.name + ".part")
+    partial.write_bytes(b"abc")
+
+    def fake_stream(method, url, *, headers=None, **kwargs):
+        assert headers == {"Range": "bytes=3-"}
+        return StreamStub(b"XYZ", status_code=200)
+
+    monkeypatch.setattr("calculinux_update.installer.httpx.stream", fake_stream)
+
+    result = installer.download(bundle, expected_sha256=None)
+    assert result.path.read_bytes() == b"XYZ"
