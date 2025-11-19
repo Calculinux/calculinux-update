@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Command-line entrypoint for the Calculinux updater."""
+
+from __future__ import annotations
+
+import importlib
+
+
+def main() -> None:
+    """Dispatch to the Typer CLI defined in calculinux_update.cli."""
+
+    cli_module = importlib.import_module("calculinux_update.cli")
+    cli_module.app()
+
+
+if __name__ == "__main__":
+    main()

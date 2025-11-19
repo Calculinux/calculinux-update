@@ -77,11 +77,14 @@ def test_list_bundles_uses_index_json_and_sorts(monkeypatch, cfg):
     assert bundles[1].last_modified is None
 
 
-def test_list_bundles_raises_when_index_missing(monkeypatch, cfg):
+def test_list_bundles_returns_empty_when_index_missing(monkeypatch, cfg, caplog):
     index_url = "https://example.com/update/test/index.json"
     stub_client = StubClient({index_url: StubResponse(status=404)})
     monkeypatch.setattr("calculinux_update.mirror.httpx.Client", lambda *_, **__: stub_client)
 
     with MirrorClient(cfg) as client:
-        with pytest.raises(RuntimeError):
-            client.list_bundles()
+        bundles = client.list_bundles()
+
+    assert bundles == []
+    assert "Failed to fetch channel Test" in caplog.text
+    assert "missing index.json" in caplog.text
