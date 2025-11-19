@@ -41,14 +41,14 @@ machine = "luckfox-lyra"
 download_dir = "/var/tmp/calculinux-update"
 
 [[channels]]
-name = "Luckfox Lyra Continuous"
-path = "/update/luckfox-lyra/continuous"
-enable = true
-
-[[channels]]
 name = "Luckfox Lyra Release"
 path = "/update/luckfox-lyra/release"
 enable = true
+
+[[channels]]
+name = "Luckfox Lyra Continuous"
+path = "/update/luckfox-lyra/continuous"
+enable = false
 
 [[channels]]
 name = "Luckfox Lyra PR Builds"
@@ -62,7 +62,7 @@ enable = false
 * `channels` – mirror-relative directories to scan for `.raucb` bundles.
 * `enable` – set to `false` to temporarily hide a channel.
 
-Pull-request bundles are configured but disabled by default. Copy the config to `/etc/calculinux-update` or `~/.config/calculinux-update`, flip `enable = true` for the PR block, and the channel will show up in `cup list`.
+Release bundles stay enabled out of the box, while the fast-moving continuous channel ships disabled so you opt-in intentionally. Pull-request bundles are also configured but disabled by default. Copy the config to `/etc/calculinux-update` or `~/.config/calculinux-update`, flip `enable = true` for whichever extra channels you want (continuous and/or PR), and they will show up in `cup list`.
 
 ## Usage
 
