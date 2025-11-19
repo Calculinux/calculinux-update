@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass
-from importlib import resources
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -121,14 +120,9 @@ def load_config(explicit: Optional[Path] = None) -> UpdateConfig:
                 data = tomllib.load(fh)
             return parse_config(data, path)
 
-    packaged = _load_packaged_default()
-    if packaged:
-        return packaged
-
     raise FileNotFoundError(
-    "No calculinux-update config found. Checked: "
-    + ", ".join(str(p) for p in candidates)
-        + " and bundled default"
+        "No calculinux-update config found. Checked: "
+        + ", ".join(str(p) for p in candidates)
     )
 
 
@@ -167,19 +161,3 @@ def parse_config(data: dict, source: Path) -> UpdateConfig:
         machine=data.get("machine"),
         channels=channels,
     )
-
-
-def _load_packaged_default() -> Optional[UpdateConfig]:
-    try:
-        resource = resources.files("calculinux_update").joinpath(
-            "defaults", DEFAULT_CONFIG_NAME
-        )
-    except ModuleNotFoundError:  # pragma: no cover - depends on packaging
-        return None
-
-    if not resource.is_file():
-        return None
-
-    with resource.open("rb") as fh:
-        data = tomllib.load(fh)
-    return parse_config(data, Path(f"package://{DEFAULT_CONFIG_NAME}"))
