@@ -43,7 +43,11 @@ class MirrorClient:
     def list_bundles(self, channel_selector: Optional[str] = None) -> List[BundleInfo]:
         bundles: List[BundleInfo] = []
         for channel in self.config.iter_channels(channel_selector):
-            bundles.extend(self._fetch_channel(channel))
+            try:
+                bundles.extend(self._fetch_channel(channel))
+            except RuntimeError as e:
+                LOGGER.warning("Failed to fetch channel %s: %s", channel.name, e)
+
         bundles.sort(key=_bundle_sort_key, reverse=True)
         return bundles
 
