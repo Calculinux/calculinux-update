@@ -14,7 +14,7 @@ A lightweight Python CLI that discovers RAUC update bundles published to the Cal
 - Lists RAUC bundles per channel (continuous, release, etc.).
 - Downloads the selected bundle with a progress bar and checksum validation.
 - Calls `rauc install <bundle>` with optional `--dry-run` to preview actions.
-- Requires each channel to expose an `index.json` manifest; legacy HTML directory scraping has been removed.
+- Requires each channel to expose an `index.json` manifest
 - Designed to be extended with new machines/channels by editing the config file only.
 
 ## Installation
@@ -43,16 +43,26 @@ download_dir = "/var/tmp/calculinux-update"
 [[channels]]
 name = "Luckfox Lyra Continuous"
 path = "/update/luckfox-lyra/continuous"
+enable = true
 
 [[channels]]
 name = "Luckfox Lyra Release"
 path = "/update/luckfox-lyra/release"
+enable = true
+
+[[channels]]
+name = "Luckfox Lyra PR Builds"
+path = "/update/luckfox-lyra/pr"
+enable = false
 ```
 
 * `mirror_base_url` – host serving bundles.
 * `machine` – used for display/hints only.
 * `download_dir` – where bundles are stored before installation (must exist or be creatable).
 * `channels` – mirror-relative directories to scan for `.raucb` bundles.
+* `enable` – set to `false` to temporarily hide a channel.
+
+Pull-request bundles are configured but disabled by default. Copy the config to `/etc/calculinux-update` or `~/.config/calculinux-update`, flip `enable = true` for the PR block, and the channel will show up in `cup list`.
 
 ## Usage
 
@@ -92,6 +102,13 @@ Dry run (download only, skip `rauc install`):
 cup install --dry-run
 ```
 Dry runs never invoke `rauc`, so the binary does not need to be present on the host.
+
+Test a pull-request build (after enabling the channel as described above, each bundle is named after the PR number):
+
+```bash
+cup list --channel "Luckfox Lyra PR Builds"
+sudo cup install --channel "Luckfox Lyra PR Builds" --bundle calculinux-pr123.raucb
+```
 
 Environment overrides:
 

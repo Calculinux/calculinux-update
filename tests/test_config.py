@@ -1,6 +1,8 @@
 from importlib import resources
 from pathlib import Path
 
+import pytest
+
 import calculinux_update.config as config_module
 from calculinux_update.config import load_config, parse_config
 
@@ -76,3 +78,22 @@ def test_packaged_default_loader_reads_resource():
     cfg = config_module._load_packaged_default()
     assert cfg is not None
     assert any(channel.name for channel in cfg.channels)
+
+
+def test_iter_channels_filters_disabled_entries(tmp_path):
+    data = {
+        "mirror_base_url": "https://example.com",
+        "download_dir": str(tmp_path),
+        "channels": [
+            {"name": "Enabled", "path": "/update/enabled"},
+            {"name": "Disabled", "path": "/update/disabled", "enable": False},
+        ],
+    }
+    cfg = parse_config(data, tmp_path / "config.toml")
+
+    enabled = list(cfg.iter_channels())
+    assert [channel.name for channel in enabled] == ["Enabled"]
+
+    with pytest.raises(ValueError) as exc:
+        list(cfg.iter_channels("Disabled"))
+    assert "disabled" in str(exc.value)

@@ -5,7 +5,14 @@ download_dir = "/var/tmp/calculinux-update"
 [[channels]]
 name = "Luckfox Lyra Continuous"
 path = "/update/luckfox-lyra/continuous"
+enable = true
 
 [[channels]]
 name = "Luckfox Lyra Release"
 path = "/update/luckfox-lyra/release"
+enable = true
+
+[[channels]]
+name = "Luckfox Lyra PR Builds"
+path = "/update/luckfox-lyra/pr"
+enable = false

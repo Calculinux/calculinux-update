@@ -20,12 +20,16 @@ class ChannelConfig:
     name: str
     path: str
     machine: Optional[str] = None
+    enable: bool = True
 
     def normalized_path(self) -> str:
         path = self.path.strip()
         if not path.startswith("/"):
             path = f"/{path}"
         return path.rstrip("/")
+
+    def is_enabled(self) -> bool:
+        return bool(self.enable)
 
 
 @dataclass(slots=True)
@@ -37,9 +41,25 @@ class UpdateConfig:
     machine: Optional[str]
     channels: List[ChannelConfig]
 
-    def iter_channels(self, selector: Optional[str] = None) -> Iterable[ChannelConfig]:
+    def iter_channels(
+        self,
+        selector: Optional[str] = None,
+        *,
+        include_disabled: bool = False,
+    ) -> Iterable[ChannelConfig]:
         if selector is None:
-            return list(self.channels)
+            channels = [
+                channel
+                for channel in self.channels
+                if include_disabled or channel.is_enabled()
+            ]
+            if not channels:
+                raise ValueError(
+                    "No channels configured"
+                    if include_disabled
+                    else "No enabled channels configured"
+                )
+            return channels
 
         selector_lower = selector.lower()
         matched = [
@@ -50,7 +70,16 @@ class UpdateConfig:
         ]
         if not matched:
             raise ValueError(f"No channel matches selector '{selector}'")
-        return matched
+
+        if include_disabled:
+            return matched
+
+        enabled = [channel for channel in matched if channel.is_enabled()]
+        if enabled:
+            return enabled
+        raise ValueError(
+            f"Channel '{selector}' is disabled in the configuration"
+        )
 
     def first_channel(self, selector: Optional[str] = None) -> ChannelConfig:
         channels = list(self.iter_channels(selector))
@@ -121,6 +150,7 @@ def parse_config(data: dict, source: Path) -> UpdateConfig:
             name=channel.get("name") or channel.get("path"),
             path=channel.get("path"),
             machine=channel.get("machine"),
+            enable=bool(channel.get("enable", True)),
         )
         for channel in channels_raw
     ]
