@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 import calculinux_update.config as config_module
