@@ -86,6 +86,10 @@ class MirrorClient:
             name = entry.get("name")
             if not name:
                 continue
+            sha256 = entry.get("sha256")
+            if not sha256:
+                LOGGER.debug("Skipping bundle %s: missing SHA256 checksum", name)
+                continue
             url = entry.get("url") or (
                 f"{self.config.mirror_base_url}{channel.normalized_path()}/{name}"
             )
@@ -96,7 +100,7 @@ class MirrorClient:
                     channel=channel,
                     size_bytes=_safe_int(entry.get("size")),
                     last_modified=_parse_iso(entry.get("last_modified")),
-                    sha256=entry.get("sha256"),
+                    sha256=sha256,
                 )
             )
         return bundles

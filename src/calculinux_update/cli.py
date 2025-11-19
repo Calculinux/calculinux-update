@@ -7,7 +7,8 @@ from typing import List, Optional
 
 import typer
 from rich.console import Console
-from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
@@ -21,26 +22,28 @@ def _load_config(config_path: Optional[Path]) -> UpdateConfig:
     return load_config(config_path)
 
 
-def _bundle_table(bundles: List[BundleInfo], show_index: bool = False) -> Table:
-    table = Table(show_header=True, header_style="bold cyan")
-    if show_index:
-        table.add_column("#", justify="right")
-    table.add_column("Bundle")
-    table.add_column("Channel")
-    table.add_column("Size", justify="right")
-    table.add_column("Last Modified")
-    table.add_column("SHA256", overflow="fold")
-
+def _display_bundles(bundles: List[BundleInfo], show_index: bool = False) -> None:
+    """Display bundles in a compact format suitable for narrow terminals."""
     for idx, bundle in enumerate(bundles, start=1):
-        table.add_row(
-            str(idx) if show_index else "",
-            bundle.name,
-            bundle.channel.name,
-            _format_size(bundle.size_bytes),
-            bundle.last_modified.isoformat(timespec="seconds") if bundle.last_modified else "?",
-            (bundle.sha256 or "?")[:12] + "…" if bundle.sha256 else "?",
-        )
-    return table
+        # Build the display text
+        lines = []
+
+        if show_index:
+            lines.append(Text(f"[{idx}]", style="bold cyan"))
+
+        lines.append(Text(f"Bundle:  {bundle.name}", style="bold white"))
+        lines.append(Text(f"Channel: {bundle.channel.name}"))
+        lines.append(Text(f"Size:    {_format_size(bundle.size_bytes)}"))
+
+        if bundle.last_modified:
+            modified = bundle.last_modified.isoformat(timespec="seconds")
+            lines.append(Text(f"Date:    {modified}"))
+
+        # Combine lines into one text object
+        content = Text("\n").join(lines)
+
+        # Display with panel for separation
+        console.print(Panel(content, border_style="dim", padding=(0, 1)))
 
 
 def _format_size(size: Optional[int]) -> str:
@@ -64,7 +67,7 @@ def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> Bundl
         console.print(f"[red]Bundle '{bundle_name}' not found.[/]")
         raise typer.Exit(code=1)
 
-    console.print(_bundle_table(bundles, show_index=True))
+    _display_bundles(bundles, show_index=True)
     selection = typer.prompt("Select bundle #", type=int)
     if selection < 1 or selection > len(bundles):
         console.print("[red]Invalid selection[/]")
@@ -96,7 +99,7 @@ def list(
         console.print("[yellow]No bundles found[/]")
         raise typer.Exit()
 
-    console.print(_bundle_table(bundles))
+    _display_bundles(bundles)
 
 
 @app.command()

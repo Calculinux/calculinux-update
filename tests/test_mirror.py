@@ -60,6 +60,7 @@ def test_list_bundles_uses_index_json_and_sorts(monkeypatch, cfg):
                 {
                     "name": "old.raucb",
                     "size": 1024,
+                    "sha256": "def456",
                 },
             ]
         }
@@ -75,6 +76,35 @@ def test_list_bundles_uses_index_json_and_sorts(monkeypatch, cfg):
     assert [bundle.name for bundle in bundles] == ["new.raucb", "old.raucb"]
     assert bundles[0].last_modified == datetime(2024, 9, 25, 10, 0, tzinfo=timezone.utc)
     assert bundles[1].last_modified is None
+
+
+def test_list_bundles_skips_bundles_without_sha256(monkeypatch, cfg):
+    index_payload = {
+        "artifacts": {
+            "rauc": [
+                {
+                    "name": "with-sha256.raucb",
+                    "size": 2048,
+                    "sha256": "abc123",
+                },
+                {
+                    "name": "without-sha256.raucb",
+                    "size": 1024,
+                },
+            ]
+        }
+    }
+
+    index_url = "https://example.com/update/test/index.json"
+    stub_client = StubClient({index_url: StubResponse(json_data=index_payload)})
+    monkeypatch.setattr("calculinux_update.mirror.httpx.Client", lambda *_, **__: stub_client)
+
+    with MirrorClient(cfg) as client:
+        bundles = client.list_bundles()
+
+    assert len(bundles) == 1
+    assert bundles[0].name == "with-sha256.raucb"
+    assert bundles[0].sha256 == "abc123"
 
 
 def test_list_bundles_returns_empty_when_index_missing(monkeypatch, cfg, caplog):
