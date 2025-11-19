@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from importlib import resources
 import tomllib
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Iterable, List, Optional
 

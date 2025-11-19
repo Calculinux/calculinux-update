@@ -43,7 +43,12 @@ class UpdateInstaller:
         self._max_attempts = max(1, max_attempts)
         self._resume_downloads = resume_downloads
 
-    def download(self, bundle: BundleInfo, *, expected_sha256: Optional[str] = None) -> DownloadResult:
+    def download(
+        self,
+        bundle: BundleInfo,
+        *,
+        expected_sha256: Optional[str] = None,
+    ) -> DownloadResult:
         dest_path = self.config.download_dir / bundle.name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         expected = (expected_sha256 or bundle.sha256 or "").lower() or None

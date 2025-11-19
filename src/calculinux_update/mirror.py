@@ -82,7 +82,9 @@ class MirrorClient:
             name = entry.get("name")
             if not name:
                 continue
-            url = entry.get("url") or f"{self.config.mirror_base_url}{channel.normalized_path()}/{name}"
+            url = entry.get("url") or (
+                f"{self.config.mirror_base_url}{channel.normalized_path()}/{name}"
+            )
             bundles.append(
                 BundleInfo(
                     name=name,
