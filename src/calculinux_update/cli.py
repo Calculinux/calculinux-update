@@ -169,7 +169,8 @@ def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> Bundl
 
         # Get user input
         prompt_text = _build_pagination_prompt(current_page, total_pages, len(bundles))
-        selection = typer.prompt(prompt_text, type=str)
+        console.print(prompt_text, end="")
+        selection = input()
 
         # Handle input
         new_page, bundle_num = _handle_pagination_input(
