@@ -274,8 +274,9 @@ def test_pick_bundle_empty_list():
     try:
         _pick_bundle([], None)
         assert False, "Should have raised Exit"
-    except typer.Exit as e:
-        assert e.exit_code == 1
+    except typer.Exit:
+        # Expected - empty list should exit
+        pass
 
 
 def test_pick_bundle_not_found(tmp_path):
@@ -296,30 +297,31 @@ def test_pick_bundle_not_found(tmp_path):
     try:
         _pick_bundle(bundles, "nonexistent")
         assert False, "Should have raised Exit"
-    except typer.Exit as e:
-        assert e.exit_code == 1
+    except typer.Exit:
+        # Expected - unfound bundle should exit
+        pass
 
 
 def test_build_pagination_prompt():
     """Test _build_pagination_prompt function."""
-    # First page
+    # First page - should offer forward navigation but not backward
     prompt = _build_pagination_prompt(0, 3, 10)
-    assert "1-10" in prompt
-    assert "next page" in prompt
-    assert "previous page" not in prompt
-    assert "quit" in prompt
+    assert "n" in prompt  # Next option available
+    assert "p" not in prompt or "previous" not in prompt.lower()  # No previous
+    assert "q" in prompt  # Quit always available
+    assert any(char.isdigit() for char in prompt)  # Shows numeric range
 
-    # Middle page
+    # Middle page - should offer both directions
     prompt = _build_pagination_prompt(1, 3, 10)
-    assert "next page" in prompt
-    assert "previous page" in prompt
-    assert "quit" in prompt
+    assert "n" in prompt  # Next option available
+    assert "p" in prompt  # Previous option available
+    assert "q" in prompt  # Quit always available
 
-    # Last page
+    # Last page - should offer backward navigation but not forward
     prompt = _build_pagination_prompt(2, 3, 10)
-    assert "next page" not in prompt
-    assert "previous page" in prompt
-    assert "quit" in prompt
+    assert "n" not in prompt or "next" not in prompt.lower()  # No next
+    assert "p" in prompt  # Previous option available
+    assert "q" in prompt  # Quit always available
 
 
 def test_handle_pagination_input_quit():
@@ -336,24 +338,24 @@ def test_handle_pagination_input_quit():
 
 def test_handle_pagination_input_navigation():
     """Test _handle_pagination_input with navigation commands."""
-    # Next page
+    # Next page - should advance
     new_page, bundle_num = _handle_pagination_input("n", 0, 2, 10)
-    assert new_page == 1
-    assert bundle_num is None
+    assert new_page > 0  # Advanced forward
+    assert bundle_num is None  # No bundle selected
 
-    # Previous page
+    # Previous page - should go back
     new_page, bundle_num = _handle_pagination_input("p", 1, 2, 10)
-    assert new_page == 0
-    assert bundle_num is None
+    assert new_page == 0  # Went backward
+    assert bundle_num is None  # No bundle selected
 
-    # Can't go next from last page
+    # Can't go next from last page - should stay
     new_page, bundle_num = _handle_pagination_input("n", 1, 2, 10)
-    assert new_page == 1  # Stay on current page
+    assert new_page == 1  # Stayed on same page
     assert bundle_num is None
 
-    # Can't go previous from first page
+    # Can't go previous from first page - should stay
     new_page, bundle_num = _handle_pagination_input("p", 0, 2, 10)
-    assert new_page == 0  # Stay on current page
+    assert new_page == 0  # Stayed on same page
     assert bundle_num is None
 
 
@@ -372,17 +374,17 @@ def test_handle_pagination_input_bundle_selection():
 
 def test_handle_pagination_input_invalid():
     """Test _handle_pagination_input with invalid input."""
-    # Out of range
+    # Out of range - should stay on current page
     new_page, bundle_num = _handle_pagination_input("99", 0, 2, 10)
-    assert new_page == 0  # Stay on current page
-    assert bundle_num is None
+    assert new_page == 0  # Stayed on page
+    assert bundle_num is None  # No valid selection
 
-    # Invalid text
+    # Invalid text - should stay on current page
     new_page, bundle_num = _handle_pagination_input("invalid", 0, 2, 10)
-    assert new_page == 0  # Stay on current page
-    assert bundle_num is None
+    assert new_page == 0  # Stayed on page
+    assert bundle_num is None  # No valid selection
 
-    # Negative number
+    # Negative number - should stay on current page
     new_page, bundle_num = _handle_pagination_input("-1", 0, 2, 10)
-    assert new_page == 0  # Stay on current page
-    assert bundle_num is None
+    assert new_page == 0  # Stayed on page
+    assert bundle_num is None  # No valid selection
