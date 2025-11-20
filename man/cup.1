@@ -1,0 +1,435 @@
+.TH CUP 1 "2024" "calculinux-update" "Calculinux System Updates"
+.SH NAME
+cup, cup-hook, cup-postreboot \- Calculinux system update tools
+.SH SYNOPSIS
+.B cup
+.RB [ list | download | install ]
+.RI [ options ]
+.br
+.B cup-hook
+.I slot_device slot_type
+.br
+.B cup-postreboot
+.SH DESCRIPTION
+The Calculinux update system provides A/B slot-based system updates with automatic OPKG package reconciliation. It consists of three commands:
+.TP
+.B cup
+Main command-line interface for browsing, downloading, and installing RAUC update bundles.
+.TP
+.B cup-hook
+RAUC hook invoked during slot-post-install phase to reconcile package status files.
+.TP
+.B cup-postreboot
+Post-reboot service that completes package reconciliation after switching to new slot.
+.SH COMMANDS
+.SS "cup list"
+List available update bundles from configured channels.
+.PP
+.B cup list
+.RI [ --channel
+.IR CHANNEL ]
+.PP
+Lists bundles sorted by date (newest first). If no channel is specified and multiple channels are enabled, lists bundles from all channels.
+.SS "cup download"
+Download an update bundle without installing it.
+.PP
+.B cup download
+.RB [ --channel
+.IR CHANNEL ]
+.B --bundle
+.I BUNDLE
+.RI [ --destination
+.IR DIR ]
+.PP
+Downloads the specified bundle to the cache directory (default: /var/cache/calculinux-update/) for later installation.
+.SS "cup install"
+Install a system update bundle.
+.PP
+.B cup install
+.RI [ --channel
+.IR CHANNEL ]
+.RI [ --bundle
+.IR BUNDLE ]
+.RI [ --yes ]
+.RI [ --dry-run ]
+.RI [ --no-prefetch ]
+.PP
+Interactively select and install an update bundle. Prefetches packages that will be reconciled after reboot, then invokes RAUC to install the bundle. System reboot is required to complete the update.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-channel " " \fICHANNEL\fR
+Specify which update channel to use. Must match a channel name from
+.IR /etc/calculinux-update.toml .
+If not specified and multiple channels are enabled, prompts for selection.
+.TP
+.BR \-b ", " \-\-bundle " " \fIBUNDLE\fR
+Specify which bundle to download or install. If not specified for install command, prompts for selection from available bundles.
+.TP
+.BR \-y ", " \-\-yes
+Skip confirmation prompts. Useful for automation. Automatically proceeds with installation without user confirmation.
+.TP
+.BR \-d ", " \-\-destination " " \fIDIR\fR
+Specify download destination directory. Only applies to download command. Defaults to /var/cache/calculinux-update/.
+.TP
+.BR \-\-dry\-run
+Perform all steps except the actual RAUC installation. Downloads bundle and performs prefetch but stops before invoking RAUC. Useful for testing.
+.TP
+.BR \-\-no\-prefetch
+Skip package prefetch phase. Post-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration.
+.SH CONFIGURATION
+.SS "Configuration File"
+.I /etc/calculinux-update.toml
+.PP
+TOML configuration file defining update channels and mirror settings.
+.PP
+Example:
+.PP
+.nf
+.RS
+mirror_base_url = "https://mirror.example.com"
+
+[[channels]]
+name = "Release"
+path = "/update/walnascar/release"
+enable = true
+
+[[channels]]
+name = "Continuous"
+path = "/update/walnascar/continuous"
+enable = false
+.RE
+.fi
+.SS "Channel Configuration"
+Each channel defines:
+.TP
+.B name
+Display name shown in
+.BR "cup list" .
+.TP
+.B path
+URL path appended to mirror_base_url to access bundle list.
+.TP
+.B enable
+Whether channel appears in interactive listings. Set to
+.B false
+to hide development channels.
+.SS "Mirror Structure"
+Update mirrors must provide a
+.I bundles.txt
+file at each channel path with the format:
+.PP
+.nf
+.RS
+# timestamp filename size sha256
+1732147200 calculinux-bundle-20241120.raucb 123456789 abc123...
+.RE
+.fi
+.SH PACKAGE RECONCILIATION
+.SS "The Problem"
+Calculinux uses dual-layer package management:
+.TP
+.B Base layer
+Read-only packages baked into the RAUC image (
+.IR /var/lib/opkg/status.image
+).
+.TP
+.B Overlay layer
+User-installed packages in writable storage (
+.IR /var/lib/opkg/status
+).
+.PP
+When updating the base image, three problems arise:
+.TP
+1.
+.B Shadowing
+\- User-installed packages that now exist in the new base (duplicates).
+.TP
+2.
+.B Missing packages
+\- Packages removed from new base that overlay packages depend on.
+.TP
+3.
+.B Version conflicts
+\- Overlay packages compiled against old base versions.
+.SS "Reconciliation Phases"
+The update system solves these problems in three phases:
+.TP
+.B Phase 1: Prefetch (before reboot)
+.B cup install
+downloads packages that will need reinstalling or upgrading after reboot. Packages are cached in
+.IR /var/cache/calculinux-update/opkg-cache/ .
+This enables offline reconciliation.
+.TP
+.B Phase 2: Hook (during RAUC install)
+.B cup-hook
+is invoked by RAUC during slot-post-install. It mounts the new slot, compares package status files, removes duplicate packages from overlay, and queues pending operations:
+.RS
+.IP \(bu 2
+.I /var/lib/opkg/opkg-status-hook.pending-reinstalls
+.IP \(bu
+.I /var/lib/opkg/opkg-status-hook.pending-upgrades
+.RE
+.TP
+.B Phase 3: Post-reboot (after slot switch)
+.B cup-postreboot
+runs on first boot into new slot (via systemd service). It updates package feeds, reinstalls missing packages (using cached .ipk files if available), upgrades all overlay packages to match new base versions, and cleans up pending files.
+.SH FILES
+.TP
+.I /etc/calculinux-update.toml
+Main configuration file defining channels and mirror settings.
+.TP
+.I /var/cache/calculinux-update/
+Cache directory for downloaded bundles and prefetched packages.
+.TP
+.I /var/cache/calculinux-update/opkg-cache/
+Prefetched .ipk package files for offline reconciliation.
+.TP
+.I /var/lib/opkg/status
+Current installed package status (writable overlay).
+.TP
+.I /var/lib/opkg/status.image
+Base image package status (read-only).
+.TP
+.I /var/lib/opkg/opkg-status-hook.pending-reinstalls
+Packages queued for reinstall after reboot.
+.TP
+.I /var/lib/opkg/opkg-status-hook.pending-upgrades
+Packages queued for upgrade after reboot.
+.TP
+.I /lib/systemd/system/calculinux-update-postreboot.service
+Systemd service that runs
+.B cup-postreboot
+on first boot after update.
+.TP
+.I /etc/rauc/system.conf
+RAUC configuration with hook integration.
+.SH ENVIRONMENT
+.TP
+.B LOGLEVEL
+Set logging verbosity. Valid values:
+.BR DEBUG ", " INFO ", " WARNING ", " ERROR .
+Default is
+.BR INFO .
+.PP
+Example:
+.PP
+.nf
+.RS
+LOGLEVEL=DEBUG cup install
+.RE
+.fi
+.TP
+.B RAUC_SLOT_DEVICE
+(Hook only) Block device of newly installed slot (e.g.,
+.IR /dev/mmcblk0p2
+). Automatically set by RAUC.
+.TP
+.B RAUC_SLOT_TYPE
+(Hook only) Slot type (e.g.,
+.IR rootfs
+). Automatically set by RAUC.
+.SH EXAMPLES
+.SS "Interactive Update"
+Install the latest update interactively:
+.PP
+.nf
+.RS
+sudo cup install
+.RE
+.fi
+.PP
+This lists available channels, bundles, prefetches packages, and prompts for confirmation.
+.SS "Update from Specific Channel"
+Install latest from Release channel:
+.PP
+.nf
+.RS
+sudo cup install --channel "Release"
+.RE
+.fi
+.SS "Install Specific Bundle"
+Install a known bundle without prompts:
+.PP
+.nf
+.RS
+sudo cup install --bundle calculinux-bundle-20241120.raucb --yes
+.RE
+.fi
+.SS "List Available Updates"
+Show bundles from all enabled channels:
+.PP
+.nf
+.RS
+cup list
+.RE
+.fi
+.PP
+Show bundles from specific channel:
+.PP
+.nf
+.RS
+cup list --channel "Continuous"
+.RE
+.fi
+.SS "Download Without Installing"
+Download a bundle for offline installation:
+.PP
+.nf
+.RS
+cup download --bundle calculinux-bundle-20241120.raucb
+.RE
+.fi
+.PP
+Later install from cache:
+.PP
+.nf
+.RS
+sudo rauc install /var/cache/calculinux-update/calculinux-bundle-20241120.raucb
+.RE
+.fi
+.SS "Development Machine Update"
+Skip prefetch on machines without OPKG configured:
+.PP
+.nf
+.RS
+sudo cup install --no-prefetch
+.RE
+.fi
+.PP
+.B Warning:
+Network access required after reboot for reconciliation.
+.SS "Check Reconciliation Status"
+After update and reboot, check reconciliation logs:
+.PP
+.nf
+.RS
+journalctl -u calculinux-update-postreboot.service
+.RE
+.fi
+.PP
+Look for messages like:
+.PP
+.nf
+.RS
+cup-hook: pruned writable status against new image
+cup-hook: queued 3 packages for reinstall
+cup-hook: queued 5 packages for upgrade
+cup-postreboot: reinstalling 3 packages
+cup-postreboot: upgrading 5 packages
+cup-postreboot: reconciliation complete
+.RE
+.fi
+.SS "Manual Hook Invocation"
+Manually run hook on a slot (for debugging):
+.PP
+.nf
+.RS
+sudo cup-hook /dev/mmcblk0p2 rootfs
+.RE
+.fi
+.SS "Manual Post-Reboot Reconciliation"
+If post-reboot service failed, retry manually:
+.PP
+.nf
+.RS
+sudo cup-postreboot
+.RE
+.fi
+.PP
+Or via systemd:
+.PP
+.nf
+.RS
+sudo systemctl restart calculinux-update-postreboot.service
+.RE
+.fi
+.SH DIAGNOSTICS
+.SS "Exit Status"
+.TP
+.B 0
+Success. Operation completed without errors.
+.TP
+.B 1
+Failure. Check logs for details.
+.SS "Logging"
+All commands log to stderr. Set
+.B LOGLEVEL=DEBUG
+for detailed diagnostics.
+.SS "Common Issues"
+.TP
+.B "Update fails to install"
+Check RAUC status:
+.PP
+.nf
+.RS
+rauc status
+journalctl -u rauc -e
+.RE
+.fi
+.TP
+.B "Packages not reconciling after reboot"
+Check post-reboot service:
+.PP
+.nf
+.RS
+systemctl status calculinux-update-postreboot.service
+journalctl -u calculinux-update-postreboot.service -e
+.RE
+.fi
+.PP
+Pending operations are stored in:
+.PP
+.nf
+.RS
+/var/lib/opkg/opkg-status-hook.pending-reinstalls
+/var/lib/opkg/opkg-status-hook.pending-upgrades
+.RE
+.fi
+.TP
+.B "Prefetch fails"
+OPKG may not be configured. Use
+.BR \-\-no\-prefetch :
+.PP
+.nf
+.RS
+sudo cup install --no-prefetch
+.RE
+.fi
+.PP
+Ensure network access is available after reboot.
+.TP
+.B "Network unavailable after reboot"
+If prefetch succeeded, reconciliation should work offline using cached packages. If not, restore network access and restart the service:
+.PP
+.nf
+.RS
+sudo systemctl restart calculinux-update-postreboot.service
+.RE
+.fi
+.SH ROLLBACK
+To roll back to the previous slot:
+.PP
+.nf
+.RS
+sudo rauc status mark-bad booted
+sudo reboot
+.RE
+.fi
+.PP
+Or select the other slot in your bootloader (if supported).
+.PP
+The previous slot remains available until overwritten by the next update.
+.SH SEE ALSO
+.BR rauc (1),
+.BR opkg (1),
+.BR systemctl (1)
+.PP
+.B RAUC Documentation:
+.I https://rauc.readthedocs.io/
+.PP
+.B Calculinux Documentation:
+.I https://docs.calculinux.org/
+.SH AUTHOR
+Calculinux Project
+.SH BUGS
+Report bugs to the Calculinux issue tracker.
