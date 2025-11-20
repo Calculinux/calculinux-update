@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "calculinux-update"
-version = "0.3.0"
+version = "0.3.1"
 description = "CLI frontend for discovering and installing Calculinux RAUC update bundles"
 readme = "README.md"
 authors = [
