@@ -2,7 +2,13 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from calculinux_update.cli import app
+from calculinux_update.cli import (
+    _build_pagination_prompt,
+    _calculate_page_size,
+    _handle_pagination_input,
+    _pick_bundle,
+    app,
+)
 from calculinux_update.config import ChannelConfig, UpdateConfig
 from calculinux_update.mirror import BundleInfo
 
@@ -208,3 +214,175 @@ def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path):
         ],
     )
     assert result.exit_code == 0
+
+
+def test_calculate_page_size():
+    """Test that _calculate_page_size returns a reasonable value."""
+    page_size = _calculate_page_size()
+    # Should be at least 1 and at most something reasonable
+    assert page_size >= 1
+    assert page_size <= 20  # Sanity check
+
+
+def test_pick_bundle_with_bundle_name(tmp_path):
+    """Test _pick_bundle with explicit bundle name."""
+    config = build_config(tmp_path)
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+        BundleInfo(
+            name="bundle2.raucb",
+            url="https://example.com/bundle2.raucb",
+            channel=config.channels[0],
+            size_bytes=2048,
+            sha256="abc2",
+        ),
+    ]
+
+    # Should find the matching bundle
+    result = _pick_bundle(bundles, "bundle2")
+    assert result.name == "bundle2.raucb"
+
+
+def test_pick_bundle_with_partial_name(tmp_path):
+    """Test _pick_bundle with partial bundle name match."""
+    config = build_config(tmp_path)
+    bundles = [
+        BundleInfo(
+            name="my-bundle-v1.0.0.raucb",
+            url="https://example.com/my-bundle-v1.0.0.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+    ]
+
+    # Partial match should work
+    result = _pick_bundle(bundles, "v1.0")
+    assert result.name == "my-bundle-v1.0.0.raucb"
+
+
+def test_pick_bundle_empty_list():
+    """Test _pick_bundle with empty bundle list."""
+    import typer
+
+    try:
+        _pick_bundle([], None)
+        assert False, "Should have raised Exit"
+    except typer.Exit as e:
+        assert e.exit_code == 1
+
+
+def test_pick_bundle_not_found(tmp_path):
+    """Test _pick_bundle with bundle name that doesn't exist."""
+    import typer
+
+    config = build_config(tmp_path)
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+    ]
+
+    try:
+        _pick_bundle(bundles, "nonexistent")
+        assert False, "Should have raised Exit"
+    except typer.Exit as e:
+        assert e.exit_code == 1
+
+
+def test_build_pagination_prompt():
+    """Test _build_pagination_prompt function."""
+    # First page
+    prompt = _build_pagination_prompt(0, 3, 10)
+    assert "1-10" in prompt
+    assert "next page" in prompt
+    assert "previous page" not in prompt
+    assert "quit" in prompt
+
+    # Middle page
+    prompt = _build_pagination_prompt(1, 3, 10)
+    assert "next page" in prompt
+    assert "previous page" in prompt
+    assert "quit" in prompt
+
+    # Last page
+    prompt = _build_pagination_prompt(2, 3, 10)
+    assert "next page" not in prompt
+    assert "previous page" in prompt
+    assert "quit" in prompt
+
+
+def test_handle_pagination_input_quit():
+    """Test _handle_pagination_input with quit command."""
+    new_page, bundle_num = _handle_pagination_input("q", 0, 2, 10)
+    assert new_page is None
+    assert bundle_num is None
+
+    # Case insensitive
+    new_page, bundle_num = _handle_pagination_input("Q", 0, 2, 10)
+    assert new_page is None
+    assert bundle_num is None
+
+
+def test_handle_pagination_input_navigation():
+    """Test _handle_pagination_input with navigation commands."""
+    # Next page
+    new_page, bundle_num = _handle_pagination_input("n", 0, 2, 10)
+    assert new_page == 1
+    assert bundle_num is None
+
+    # Previous page
+    new_page, bundle_num = _handle_pagination_input("p", 1, 2, 10)
+    assert new_page == 0
+    assert bundle_num is None
+
+    # Can't go next from last page
+    new_page, bundle_num = _handle_pagination_input("n", 1, 2, 10)
+    assert new_page == 1  # Stay on current page
+    assert bundle_num is None
+
+    # Can't go previous from first page
+    new_page, bundle_num = _handle_pagination_input("p", 0, 2, 10)
+    assert new_page == 0  # Stay on current page
+    assert bundle_num is None
+
+
+def test_handle_pagination_input_bundle_selection():
+    """Test _handle_pagination_input with bundle number selection."""
+    # Valid bundle number
+    new_page, bundle_num = _handle_pagination_input("5", 0, 2, 10)
+    assert new_page is None
+    assert bundle_num == 5
+
+    # Another valid number
+    new_page, bundle_num = _handle_pagination_input("1", 0, 2, 10)
+    assert new_page is None
+    assert bundle_num == 1
+
+
+def test_handle_pagination_input_invalid():
+    """Test _handle_pagination_input with invalid input."""
+    # Out of range
+    new_page, bundle_num = _handle_pagination_input("99", 0, 2, 10)
+    assert new_page == 0  # Stay on current page
+    assert bundle_num is None
+
+    # Invalid text
+    new_page, bundle_num = _handle_pagination_input("invalid", 0, 2, 10)
+    assert new_page == 0  # Stay on current page
+    assert bundle_num is None
+
+    # Negative number
+    new_page, bundle_num = _handle_pagination_input("-1", 0, 2, 10)
+    assert new_page == 0  # Stay on current page
+    assert bundle_num is None

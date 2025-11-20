@@ -56,6 +56,92 @@ def _format_size(size: Optional[int]) -> str:
     return f"{size:.1f}TB"
 
 
+def _calculate_page_size() -> int:
+    """
+    Calculate optimal page size based on terminal height.
+    Each bundle takes ~7-8 lines (panel with 4-5 content lines + borders).
+    Reserve space for page header, prompt, and some margin.
+    """
+    try:
+        terminal_height = console.size.height
+        # Reserve ~5 lines for page header, prompt, and spacing
+        available_lines = max(terminal_height - 5, 10)
+        # Each bundle takes about 8 lines (including panel borders)
+        bundles_per_page = max(available_lines // 8, 1)
+        return bundles_per_page
+    except Exception:
+        # Fallback to a reasonable default if terminal size can't be determined
+        return 3
+
+
+def _display_bundle_page(
+    bundles: List[BundleInfo], start_idx: int, end_idx: int
+) -> None:
+    """Display a single page of bundles."""
+    page_bundles = bundles[start_idx:end_idx]
+    for i, bundle in enumerate(page_bundles, start=start_idx + 1):
+        lines = [
+            Text(f"[{i}]", style="bold cyan"),
+            Text(f"Bundle:  {bundle.name}", style="bold white"),
+            Text(f"Channel: {bundle.channel.name}"),
+            Text(f"Size:    {_format_size(bundle.size_bytes)}"),
+        ]
+        if bundle.last_modified:
+            modified = bundle.last_modified.isoformat(timespec="seconds")
+            lines.append(Text(f"Date:    {modified}"))
+        content = Text("\n").join(lines)
+        console.print(Panel(content, border_style="dim", padding=(0, 1)))
+
+
+def _build_pagination_prompt(
+    current_page: int, total_pages: int, total_bundles: int
+) -> str:
+    """Build the pagination prompt text with available options."""
+    options = []
+    if current_page < total_pages - 1:
+        options.append("[bold green]n[/] next page")
+    if current_page > 0:
+        options.append("[bold green]p[/] previous page")
+    options.append("[bold green]q[/] quit")
+
+    return f"Select bundle # (1-{total_bundles}), " + ", ".join(options) + ": "
+
+
+def _handle_pagination_input(
+    selection: str, current_page: int, total_pages: int, total_bundles: int
+) -> tuple[Optional[int], Optional[int]]:
+    """
+    Handle pagination input and return (new_page, selected_bundle_num).
+    Returns (None, None) for quit, (new_page, None) for navigation,
+    (None, bundle_num) for selection, or raises for invalid input.
+    """
+    selection = selection.strip().lower()
+
+    if selection == "q":
+        return (None, None)  # Quit signal
+    elif selection == "n" and current_page < total_pages - 1:
+        return (current_page + 1, None)  # Next page
+    elif selection == "p" and current_page > 0:
+        return (current_page - 1, None)  # Previous page
+    else:
+        # Try to parse as bundle number
+        try:
+            bundle_num = int(selection)
+            if 1 <= bundle_num <= total_bundles:
+                return (None, bundle_num)  # Valid selection
+            else:
+                console.print(
+                    f"[red]Invalid bundle number. Must be between 1 and {total_bundles}[/]"
+                )
+                return (current_page, None)  # Stay on current page
+        except ValueError:
+            console.print(
+                "[red]Invalid input. Enter a bundle number, 'n' for next, "
+                "'p' for previous, or 'q' to quit.[/]"
+            )
+            return (current_page, None)  # Stay on current page
+
+
 def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> BundleInfo:
     if not bundles:
         raise typer.Exit(code=1)
@@ -67,12 +153,40 @@ def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> Bundl
         console.print(f"[red]Bundle '{bundle_name}' not found.[/]")
         raise typer.Exit(code=1)
 
-    _display_bundles(bundles, show_index=True)
-    selection = typer.prompt("Select bundle #", type=int)
-    if selection < 1 or selection > len(bundles):
-        console.print("[red]Invalid selection[/]")
-        raise typer.Exit(code=1)
-    return bundles[selection - 1]
+    # Interactive selection with pagination based on terminal size
+    page_size = _calculate_page_size()
+    total_pages = (len(bundles) + page_size - 1) // page_size
+    current_page = 0
+
+    while True:
+        # Calculate page bounds
+        start_idx = current_page * page_size
+        end_idx = min(start_idx + page_size, len(bundles))
+
+        # Display current page
+        console.print(f"\n[bold cyan]Page {current_page + 1} of {total_pages}[/]")
+        _display_bundle_page(bundles, start_idx, end_idx)
+
+        # Get user input
+        prompt_text = _build_pagination_prompt(current_page, total_pages, len(bundles))
+        selection = typer.prompt(prompt_text, type=str)
+
+        # Handle input
+        new_page, bundle_num = _handle_pagination_input(
+            selection, current_page, total_pages, len(bundles)
+        )
+
+        if new_page is None and bundle_num is None:
+            # Quit signal
+            console.print("[yellow]Selection cancelled[/]")
+            raise typer.Exit(code=0)
+        elif bundle_num is not None:
+            # Valid selection
+            return bundles[bundle_num - 1]
+        else:
+            # Navigation to new page
+            current_page = new_page
+
 
 
 @app.command()
