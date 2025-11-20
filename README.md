@@ -10,7 +10,7 @@ A lightweight Python CLI that discovers RAUC update bundles published to the Cal
 
 ## Features
 
-- Reads mirror configuration from `/etc/calculinux-update/config.toml` (override via `~/.config` or `CALCULINUX_UPDATE_CONFIG`).
+- Reads mirror configuration from `/etc/calculinux-update.toml` or `~/.config/calculinux-update.toml` (override via `CALCULINUX_UPDATE_CONFIG`).
 - Lists RAUC bundles per channel (continuous, release, etc.).
 - Downloads the selected bundle with a progress bar and checksum validation.
 - Calls `rauc install <bundle>` with optional `--dry-run` to preview actions.
@@ -28,12 +28,24 @@ pip install -e .[dev]
 Copy the default configuration into place (requires sudo for `/etc`).
 
 ```bash
-sudo install -D -m 0644 config/calculinux-update.toml /etc/calculinux-update/config.toml
+sudo install -D -m 0644 config/calculinux-update.toml /etc/calculinux-update.toml
+```
+
+Alternatively, install to your user config directory:
+
+```bash
+install -D -m 0644 config/calculinux-update.toml ~/.config/calculinux-update.toml
 ```
 
 ## Configuration
 
-`/etc/calculinux-update/config.toml` example:
+An example configuration is provided in `config/calculinux-update.toml`. Copy it to one of the following locations:
+
+* `/etc/calculinux-update.toml` (system-wide, requires sudo)
+* `~/.config/calculinux-update.toml` (user-specific)
+* Or set `CALCULINUX_UPDATE_CONFIG` to point to a custom location
+
+Example configuration:
 
 ```toml
 mirror_base_url = "https://opkg.calculinux.org"
@@ -41,18 +53,18 @@ machine = "luckfox-lyra"
 download_dir = "/var/cache/calculinux-update"
 
 [[channels]]
-name = "Luckfox Lyra Release"
-path = "/update/luckfox-lyra/release"
+name = "Release"
+path = "/update/walnascar/release"
 enable = true
 
 [[channels]]
-name = "Luckfox Lyra Continuous"
-path = "/update/luckfox-lyra/continuous"
+name = "Continuous"
+path = "/update/walnascar/continuous"
 enable = false
 
 [[channels]]
-name = "Luckfox Lyra PR Builds"
-path = "/update/luckfox-lyra/pr"
+name = "Builds"
+path = "/update/walnascar/pr"
 enable = false
 ```
 
@@ -62,7 +74,7 @@ enable = false
 * `channels` – mirror-relative directories to scan for `.raucb` bundles.
 * `enable` – set to `false` to temporarily hide a channel.
 
-Release bundles stay enabled out of the box, while the fast-moving continuous channel ships disabled so you opt-in intentionally. Pull-request bundles are also configured but disabled by default. Copy the config to `/etc/calculinux-update` or `~/.config/calculinux-update`, flip `enable = true` for whichever extra channels you want (continuous and/or PR), and they will show up in `cup list`.
+Release bundles stay enabled out of the box, while the fast-moving continuous channel ships disabled so you opt-in intentionally. Pull-request bundles are also configured but disabled by default. Copy the config to `/etc/calculinux-update.toml` or `~/.config/calculinux-update.toml`, flip `enable = true` for whichever extra channels you want (continuous and/or PR), and they will show up in `cup list`.
 
 ## Usage
 
@@ -75,7 +87,7 @@ cup list
 List only the release channel:
 
 ```bash
-cup list --channel "Luckfox Lyra Release"
+cup list --channel "Release"
 ```
 
 Install interactively (downloads and prompts for confirmation):
@@ -87,7 +99,7 @@ sudo cup install
 Install a specific bundle directly:
 
 ```bash
-sudo cup install --channel continuous --bundle calculinux-bundle-luckfox-lyra.raucb
+sudo cup install --channel Continuous --bundle calculinux-bundle-luckfox-lyra.raucb
 ```
 
 Run non-interactively (skips the confirmation prompt):
@@ -106,8 +118,8 @@ Dry runs never invoke `rauc`, so the binary does not need to be present on the h
 Test a pull-request build (after enabling the channel as described above, each bundle is named after the PR number):
 
 ```bash
-cup list --channel "Luckfox Lyra PR Builds"
-sudo cup install --channel "Luckfox Lyra PR Builds" --bundle calculinux-pr123.raucb
+cup list --channel "Builds"
+sudo cup install --channel "Builds" --bundle calculinux-pr123.raucb
 ```
 
 Environment overrides:
