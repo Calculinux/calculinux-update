@@ -189,6 +189,53 @@ def _pick_bundle(bundles: List[BundleInfo], bundle_name: Optional[str]) -> Bundl
             current_page = new_page
 
 
+def _pick_channel(bundles: List[BundleInfo]) -> str:
+    """
+    Prompt user to select a channel from available channels in bundles.
+    Returns the selected channel name.
+    """
+    # Get unique channels from bundles
+    channels = {}
+    for bundle in bundles:
+        channel_name = bundle.channel.name
+        if channel_name not in channels:
+            channels[channel_name] = bundle.channel
+
+    if len(channels) == 1:
+        # Only one channel, return it directly
+        return next(iter(channels.keys()))
+
+    # Display available channels
+    console.print("\n[bold cyan]Available Channels:[/]")
+    channel_list = sorted(channels.keys())
+    for i, channel_name in enumerate(channel_list, start=1):
+        console.print(f"[{i}] {channel_name}")
+
+    # Prompt for selection
+    while True:
+        prompt = (
+            f"\nSelect channel # (1-{len(channel_list)}) or [bold green]q[/] to quit: "
+        )
+        console.print(prompt, end="")
+        selection = input().strip().lower()
+
+        if selection == "q":
+            console.print("[yellow]Selection cancelled[/]")
+            raise typer.Exit(code=0)
+
+        try:
+            channel_num = int(selection)
+            if 1 <= channel_num <= len(channel_list):
+                return channel_list[channel_num - 1]
+            else:
+                console.print(
+                    f"[red]Invalid channel number. "
+                    f"Must be between 1 and {len(channel_list)}[/]"
+                )
+        except ValueError:
+            console.print("[red]Invalid input. Enter a channel number or 'q' to quit.[/]")
+
+
 
 @app.command()
 def list(
@@ -247,6 +294,11 @@ def download(
         console.print("[yellow]No bundles found[/]")
         raise typer.Exit()
 
+    # If no channel specified and bundles are not pre-filtered, prompt for channel
+    if not channel and not bundle_name:
+        selected_channel = _pick_channel(bundles)
+        bundles = [b for b in bundles if b.channel.name == selected_channel]
+
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
@@ -302,6 +354,11 @@ def install(
     if not bundles:
         console.print("[yellow]No bundles found[/]")
         raise typer.Exit()
+
+    # If no channel specified and bundles are not pre-filtered, prompt for channel
+    if not channel and not bundle_name:
+        selected_channel = _pick_channel(bundles)
+        bundles = [b for b in bundles if b.channel.name == selected_channel]
 
     bundle = _pick_bundle(bundles, bundle_name)
     installer = UpdateInstaller(config)

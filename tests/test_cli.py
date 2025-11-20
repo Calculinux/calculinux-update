@@ -7,6 +7,7 @@ from calculinux_update.cli import (
     _calculate_page_size,
     _handle_pagination_input,
     _pick_bundle,
+    _pick_channel,
     app,
 )
 from calculinux_update.config import ChannelConfig, UpdateConfig
@@ -388,3 +389,141 @@ def test_handle_pagination_input_invalid():
     new_page, bundle_num = _handle_pagination_input("-1", 0, 2, 10)
     assert new_page == 0  # Stayed on page
     assert bundle_num is None  # No valid selection
+
+
+def test_pick_channel_single_channel(tmp_path):
+    """Test _pick_channel with only one channel - should return without prompting."""
+    config = build_config(tmp_path)
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+        BundleInfo(
+            name="bundle2.raucb",
+            url="https://example.com/bundle2.raucb",
+            channel=config.channels[0],
+            size_bytes=2048,
+            sha256="abc2",
+        ),
+    ]
+
+    # Should return the only channel without prompting
+    result = _pick_channel(bundles)
+    assert result == "Test"
+
+
+def test_pick_channel_multiple_channels(monkeypatch, tmp_path):
+    """Test _pick_channel with multiple channels."""
+    config = UpdateConfig(
+        mirror_base_url="https://example.com",
+        download_dir=tmp_path,
+        machine="luckfox",
+        channels=[
+            ChannelConfig(name="Release", path="/update/release"),
+            ChannelConfig(name="Continuous", path="/update/continuous"),
+        ],
+    )
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+        BundleInfo(
+            name="bundle2.raucb",
+            url="https://example.com/bundle2.raucb",
+            channel=config.channels[1],
+            size_bytes=2048,
+            sha256="abc2",
+        ),
+    ]
+
+    # Mock user selecting channel 1 (first in sorted list: "Continuous")
+    monkeypatch.setattr("builtins.input", lambda: "1")
+
+    result = _pick_channel(bundles)
+    assert result == "Continuous"
+
+
+def test_pick_channel_quit(monkeypatch, tmp_path):
+    """Test _pick_channel when user quits."""
+    import typer
+
+    config = UpdateConfig(
+        mirror_base_url="https://example.com",
+        download_dir=tmp_path,
+        machine="luckfox",
+        channels=[
+            ChannelConfig(name="Release", path="/update/release"),
+            ChannelConfig(name="Continuous", path="/update/continuous"),
+        ],
+    )
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+        BundleInfo(
+            name="bundle2.raucb",
+            url="https://example.com/bundle2.raucb",
+            channel=config.channels[1],
+            size_bytes=2048,
+            sha256="abc2",
+        ),
+    ]
+
+    # Mock user quitting
+    monkeypatch.setattr("builtins.input", lambda: "q")
+
+    try:
+        _pick_channel(bundles)
+        assert False, "Should have raised Exit"
+    except typer.Exit:
+        # Expected - quit should exit
+        pass
+
+
+def test_pick_channel_invalid_then_valid(monkeypatch, tmp_path):
+    """Test _pick_channel with invalid input followed by valid input."""
+    config = UpdateConfig(
+        mirror_base_url="https://example.com",
+        download_dir=tmp_path,
+        machine="luckfox",
+        channels=[
+            ChannelConfig(name="Release", path="/update/release"),
+            ChannelConfig(name="Continuous", path="/update/continuous"),
+        ],
+    )
+    bundles = [
+        BundleInfo(
+            name="bundle1.raucb",
+            url="https://example.com/bundle1.raucb",
+            channel=config.channels[0],
+            size_bytes=1024,
+            sha256="abc1",
+        ),
+        BundleInfo(
+            name="bundle2.raucb",
+            url="https://example.com/bundle2.raucb",
+            channel=config.channels[1],
+            size_bytes=2048,
+            sha256="abc2",
+        ),
+    ]
+
+    # Mock user entering invalid input, then valid input
+    inputs = iter(["99", "invalid", "2"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    result = _pick_channel(bundles)
+    assert result == "Release"  # Second in sorted list
+
