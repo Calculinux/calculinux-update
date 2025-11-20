@@ -13,6 +13,7 @@ from rich.text import Text
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
+from .prefetch import PrefetchError, prefetch_for_bundle
 
 app = typer.Typer(help="Calculinux RAUC update helper")
 console = Console()
@@ -342,6 +343,11 @@ def install(
         "--assume-yes",
         help="Run non-interactively and skip the confirmation prompt",
     ),
+    prefetch: bool = typer.Option(
+        True,
+        "--prefetch/--no-prefetch",
+        help="Download post-reboot packages ahead of time",
+    ),
 ):
     """Download and install a bundle via RAUC."""
 
@@ -372,6 +378,15 @@ def install(
     if not confirm:
         console.print("[yellow]Installation skipped[/]")
         raise typer.Exit()
+
+    if prefetch and not dry_run:
+        console.print("[cyan]Prefetching post-reboot packages[/]", highlight=False)
+        try:
+            result_prefetch = prefetch_for_bundle(result.path, result.sha256, console)
+            if result_prefetch.skipped and result_prefetch.reason:
+                console.print(f"[yellow]Prefetch skipped:[/] {result_prefetch.reason}")
+        except PrefetchError as exc:
+            console.print(f"[red]Prefetch failed:[/] {exc}")
 
     installer.run_rauc_install(
         result.path,

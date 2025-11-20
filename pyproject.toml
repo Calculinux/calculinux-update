@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "calculinux-update"
-version = "0.3.2"
+version = "0.4.0"
 description = "CLI frontend for discovering and installing Calculinux RAUC update bundles"
 readme = "README.md"
 authors = [
@@ -28,6 +28,8 @@ dev = [
 
 [project.scripts]
 cup = "calculinux_update.cli:app"
+cup-hook = "calculinux_update.hooks:hook_entrypoint"
+cup-postreboot = "calculinux_update.hooks:postreboot_entrypoint"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/calculinux_update"]

@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""RAUC hook entrypoint for Calculinux."""
+
+from __future__ import annotations
+
+import importlib
+
+
+def main() -> None:
+    module = importlib.import_module("calculinux_update.hooks")
+    module.hook_entrypoint()
+
+
+if __name__ == "__main__":
+    main()

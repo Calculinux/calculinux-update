@@ -14,6 +14,7 @@ A lightweight Python CLI that discovers RAUC update bundles published to the Cal
 - Lists RAUC bundles per channel (continuous, release, etc.).
 - Downloads the selected bundle with a progress bar and checksum validation.
 - Calls `rauc install <bundle>` with optional `--dry-run` to preview actions.
+- Prefetches any packages that will be reinstalled after the update so the post-reboot step can run offline (disable with `--no-prefetch`).
 - Requires each channel to expose an `index.json` manifest
 - Designed to be extended with new machines/channels by editing the config file only.
 
@@ -121,6 +122,8 @@ Test a pull-request build (after enabling the channel as described above, each b
 cup list --channel "Builds"
 sudo cup install --channel "Builds" --bundle calculinux-pr123.raucb
 ```
+
+To skip the pre-download step (for example on development hosts without `opkg` configured), pass `--no-prefetch` when invoking `cup install`.
 
 Environment overrides:
 

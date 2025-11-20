@@ -129,6 +129,10 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path):
         lambda cfg: StubMirror(cfg, [bundle]),
     )
     monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+    monkeypatch.setattr(
+        "calculinux_update.cli.prefetch_for_bundle",
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
+    )
 
     result = runner.invoke(
         app,
@@ -163,6 +167,10 @@ def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "calculinux_update.cli.MirrorClient",
         lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr(
+        "calculinux_update.cli.prefetch_for_bundle",
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
     )
 
     def fail_confirm(*_args, **_kwargs):
@@ -215,6 +223,136 @@ def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path):
         ],
     )
     assert result.exit_code == 0
+
+
+def test_cli_install_runs_prefetch(monkeypatch, tmp_path):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+
+    prefetch_calls: list[tuple[str, str]] = []
+
+    def fake_prefetch(path, sha, *_args, **_kwargs):
+        prefetch_calls.append((str(path), sha))
+        return SimpleNamespace(skipped=False, downloaded=1, planned=1, reason=None)
+
+    monkeypatch.setattr("calculinux_update.cli.prefetch_for_bundle", fake_prefetch)
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "--bundle",
+            "bundle",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0
+    assert prefetch_calls
+
+
+def test_cli_install_no_prefetch_flag(monkeypatch, tmp_path):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+
+    calls = []
+
+    def fake_prefetch(*_args, **_kwargs):
+        calls.append(True)
+        return SimpleNamespace(skipped=False, downloaded=1, planned=1)
+
+    monkeypatch.setattr("calculinux_update.cli.prefetch_for_bundle", fake_prefetch)
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "--bundle",
+            "bundle",
+            "--yes",
+            "--dry-run",
+            "--no-prefetch",
+        ],
+    )
+    assert result.exit_code == 0
+    assert not calls
+
+
+def test_cli_install_prefetch_failure(monkeypatch, tmp_path):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+
+    from calculinux_update.prefetch import PrefetchError
+
+    def raise_prefetch(*_args, **_kwargs):
+        raise PrefetchError("boom")
+
+    monkeypatch.setattr("calculinux_update.cli.prefetch_for_bundle", raise_prefetch)
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "--bundle",
+            "bundle",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Prefetch failed" in result.stdout
+
 
 
 def test_calculate_page_size():
@@ -526,4 +664,3 @@ def test_pick_channel_invalid_then_valid(monkeypatch, tmp_path):
 
     result = _pick_channel(bundles)
     assert result == "Release"  # Second in sorted list
-
