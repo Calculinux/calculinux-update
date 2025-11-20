@@ -1,18 +1,18 @@
 mirror_base_url = "https://opkg.calculinux.org"
 machine = "luckfox-lyra"
-download_dir = "/var/tmp/calculinux-update"
+download_dir = "/var/cache/calculinux-update"
 
 [[channels]]
-name = "Luckfox Lyra Release"
-path = "/update/luckfox-lyra/release"
+name = "Release"
+path = "/update/walnascar/release"
 enable = true
 
 [[channels]]
-name = "Luckfox Lyra Continuous"
-path = "/update/luckfox-lyra/continuous"
+name = "Continuous"
+path = "/update/walnascar/continuous"
 enable = false
 
 [[channels]]
-name = "Luckfox Lyra PR Builds"
-path = "/update/luckfox-lyra/pr"
+name = "Builds"
+path = "/update/walnascar/pr"
 enable = false

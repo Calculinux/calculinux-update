@@ -24,6 +24,7 @@ class BundleInfo:
     size_bytes: Optional[int] = None
     last_modified: Optional[datetime] = None
     sha256: Optional[str] = None
+    machine: Optional[str] = None
 
 
 class MirrorClient:
@@ -90,6 +91,19 @@ class MirrorClient:
             if not sha256:
                 LOGGER.debug("Skipping bundle %s: missing SHA256 checksum", name)
                 continue
+
+            # Check if bundle machine matches config machine
+            bundle_machine = entry.get("machine")
+            if bundle_machine and self.config.machine:
+                if bundle_machine != self.config.machine:
+                    LOGGER.debug(
+                        "Skipping bundle %s: machine '%s' does not match configured machine '%s'",
+                        name,
+                        bundle_machine,
+                        self.config.machine,
+                    )
+                    continue
+
             url = entry.get("url") or (
                 f"{self.config.mirror_base_url}{channel.normalized_path()}/{name}"
             )
@@ -101,6 +115,7 @@ class MirrorClient:
                     size_bytes=_safe_int(entry.get("size")),
                     last_modified=_parse_iso(entry.get("last_modified")),
                     sha256=sha256,
+                    machine=bundle_machine,
                 )
             )
         return bundles

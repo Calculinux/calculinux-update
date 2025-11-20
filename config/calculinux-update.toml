@@ -1,6 +1,6 @@
 mirror_base_url = "https://opkg.calculinux.org"
 machine = "walnascar"
-download_dir = "/var/tmp/calculinux-update"
+download_dir = "/var/cache/calculinux-update"
 
 [[channels]]
 name = "Walnascar Release"

@@ -38,7 +38,7 @@ sudo install -D -m 0644 config/calculinux-update.toml /etc/calculinux-update/con
 ```toml
 mirror_base_url = "https://opkg.calculinux.org"
 machine = "luckfox-lyra"
-download_dir = "/var/tmp/calculinux-update"
+download_dir = "/var/cache/calculinux-update"
 
 [[channels]]
 name = "Luckfox Lyra Release"
@@ -57,7 +57,7 @@ enable = false
 ```
 
 * `mirror_base_url` – host serving bundles.
-* `machine` – used for display/hints only.
+* `machine` – machine/board type for filtering compatible bundles. If omitted, the tool will attempt to auto-detect from RAUC or the device tree. On target devices, auto-detection usually works; for development machines, set this explicitly.
 * `download_dir` – where bundles are stored before installation (must exist or be creatable).
 * `channels` – mirror-relative directories to scan for `.raucb` bundles.
 * `enable` – set to `false` to temporarily hide a channel.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,13 +127,61 @@ def load_config(explicit: Optional[Path] = None) -> UpdateConfig:
     )
 
 
+def _detect_machine() -> Optional[str]:
+    """
+    Attempt to auto-detect the machine type.
+    Tries in order:
+    1. RAUC's compatible string (rauc status --detailed)
+       - Strips 'calculinux-' prefix if present
+    2. Device tree model file
+    3. Returns None if detection fails
+    """
+    # Try RAUC first - it knows the machine/compatible string
+    try:
+        result = subprocess.run(
+            ["rauc", "status", "--detailed", "--output-format=shell"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            # Parse shell format: RAUC_SYSTEM_COMPATIBLE='...'
+            for line in result.stdout.splitlines():
+                if line.startswith("RAUC_SYSTEM_COMPATIBLE="):
+                    compatible = line.split("=", 1)[1].strip("'\"")
+                    if compatible:
+                        # Strip 'calculinux-' prefix if present
+                        # e.g., 'calculinux-luckfox-lyra' -> 'luckfox-lyra'
+                        if compatible.startswith("calculinux-"):
+                            compatible = compatible[len("calculinux-"):]
+                        return compatible
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        pass
+
+    # Try device tree model
+    dt_paths = [
+        Path("/proc/device-tree/model"),
+        Path("/sys/firmware/devicetree/base/model"),
+    ]
+    for dt_path in dt_paths:
+        try:
+            if dt_path.exists():
+                model = dt_path.read_text().strip().rstrip("\x00")
+                if model:
+                    return model
+        except (OSError, PermissionError):
+            pass
+
+    return None
+
+
 def parse_config(data: dict, source: Path) -> UpdateConfig:
     mirror_base_url = data.get("mirror_base_url")
     if not mirror_base_url:
         raise ValueError(f"mirror_base_url missing in {source}")
     mirror_base_url = mirror_base_url.rstrip("/")
 
-    download_dir_str = data.get("download_dir", "/var/tmp/calculinux-update")
+    download_dir_str = data.get("download_dir", "/var/cache/calculinux-update")
     download_dir = Path(download_dir_str)
 
     channels_raw = data.get("channels") or []
@@ -155,9 +204,14 @@ def parse_config(data: dict, source: Path) -> UpdateConfig:
 
     download_dir.mkdir(parents=True, exist_ok=True)
 
+    # Get machine from config, or try to auto-detect
+    machine = data.get("machine")
+    if not machine:
+        machine = _detect_machine()
+
     return UpdateConfig(
         mirror_base_url=mirror_base_url,
         download_dir=download_dir,
-        machine=data.get("machine"),
+        machine=machine,
         channels=channels,
     )

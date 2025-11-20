@@ -1,7 +1,7 @@
 import pytest
 
 import calculinux_update.config as config_module
-from calculinux_update.config import load_config, parse_config
+from calculinux_update.config import _detect_machine, load_config, parse_config
 
 
 def test_load_config_from_explicit(tmp_path):
@@ -67,3 +67,74 @@ def test_iter_channels_filters_disabled_entries(tmp_path):
     with pytest.raises(ValueError) as exc:
         list(cfg.iter_channels("Disabled"))
     assert "disabled" in str(exc.value)
+
+
+def test_detect_machine_strips_calculinux_prefix(monkeypatch):
+    # Mock subprocess to return calculinux-prefixed compatible string
+    import subprocess
+    from unittest.mock import MagicMock
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "RAUC_SYSTEM_COMPATIBLE='calculinux-luckfox-lyra'\n"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: mock_result,
+    )
+
+    machine = _detect_machine()
+    assert machine == "luckfox-lyra"
+
+
+def test_detect_machine_handles_non_calculinux_prefix(monkeypatch):
+    # Mock subprocess to return non-calculinux compatible string
+    import subprocess
+    from unittest.mock import MagicMock
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "RAUC_SYSTEM_COMPATIBLE='some-other-device'\n"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: mock_result,
+    )
+
+    machine = _detect_machine()
+    assert machine == "some-other-device"
+
+
+def test_parse_config_uses_detected_machine_when_not_specified(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        config_module,
+        "_detect_machine",
+        lambda: "luckfox-lyra",
+    )
+
+    data = {
+        "mirror_base_url": "https://example.com",
+        "download_dir": str(tmp_path),
+        "channels": [{"name": "Test", "path": "/update/test"}],
+    }
+    cfg = parse_config(data, tmp_path / "config.toml")
+    assert cfg.machine == "luckfox-lyra"
+
+
+def test_parse_config_prefers_explicit_machine_over_detection(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        config_module,
+        "_detect_machine",
+        lambda: "auto-detected",
+    )
+
+    data = {
+        "mirror_base_url": "https://example.com",
+        "download_dir": str(tmp_path),
+        "machine": "explicit-machine",
+        "channels": [{"name": "Test", "path": "/update/test"}],
+    }
+    cfg = parse_config(data, tmp_path / "config.toml")
+    assert cfg.machine == "explicit-machine"
