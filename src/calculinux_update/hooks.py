@@ -41,6 +41,7 @@ PRE_UPDATE_WRITABLE_STATUS = STATE_DIR / "update-state.pre-update-writable"
 PRE_UPDATE_SLOT_NAME = STATE_DIR / "update-state.pre-update-slot"
 UPDATED_SLOT_NAME = STATE_DIR / "update-state.updated-slot"
 UPDATE_BOOT_ID = STATE_DIR / "update-state.boot-id"
+STATUS_PRUNED_MARKER = STATE_DIR / "status-pruned"
 
 # Cache directory
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
@@ -183,6 +184,7 @@ def _cleanup_update_state() -> None:
         UPDATE_BOOT_ID,
         PENDING_REINSTALL_FILE,
         PENDING_UPGRADE_FILE,
+        STATUS_PRUNED_MARKER,  # Clear pruned marker on new update
     ]
 
     for path in state_files:
@@ -427,7 +429,37 @@ def postreboot_entrypoint() -> None:
                 raise SystemExit(1)
 
         # Not a rollback - proceed with forward update processing
-        if not PENDING_REINSTALL_FILE.exists() and not PENDING_UPGRADE_FILE.exists():
+        has_pending = PENDING_REINSTALL_FILE.exists() or PENDING_UPGRADE_FILE.exists()
+        
+        # Check if we need to prune writable status
+        # We only do this once per image to avoid running on every boot
+        needs_pruning = (
+            CURRENT_IMAGE_STATUS.exists() and 
+            WRITABLE_STATUS.exists() and 
+            not STATUS_PRUNED_MARKER.exists()
+        )
+        
+        if needs_pruning:
+            try:
+                image_packages = load_package_names(CURRENT_IMAGE_STATUS)
+                changed = prune_writable_status(WRITABLE_STATUS, image_packages)
+                if changed:
+                    LOG.info("pruned writable status against base image")
+                else:
+                    LOG.info("writable status already clean")
+                
+                # Mark as pruned so we don't run again
+                _atomic_write(STATUS_PRUNED_MARKER, "pruned\n")
+                LOG.info("marked status as pruned for this image")
+            except (OSError, IOError) as e:
+                LOG.warning("failed to prune writable status: %s", e)
+        
+        # If no pending operations, we're done
+        if not has_pending:
+            if needs_pruning:
+                LOG.info("status cleanup complete, no pending operations")
+            else:
+                LOG.info("no pending operations and status already pruned")
             return
 
         if not _run_opkg(["update"]):

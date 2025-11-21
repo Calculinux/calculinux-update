@@ -129,7 +129,7 @@ Test a pull-request build (after enabling the channel as described above, each b
 
 ```bash
 cup list --channel "Builds"
-sudo cup install --channel "Builds" --bundle calculinux-pr123.raucb
+sudo cup install --channel "Builds" --bundle luckfox-lyra-pr123.raucb
 ```
 
 To skip the pre-download step (for example on development hosts without `opkg` configured), pass `--no-prefetch` when invoking `cup install`.
