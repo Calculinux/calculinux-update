@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +42,10 @@ def extract_bundle_extras(bundle_path: Path) -> Optional[BundleExtras]:
         raise FileNotFoundError(bundle_path)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="cup-bundle-"))
+    tarball_name = "bundle-extras.tar.gz"
+    
     try:
+        # Extract the tarball from the bundle
         subprocess.run(
             [
                 "unsquashfs",
@@ -49,7 +53,7 @@ def extract_bundle_extras(bundle_path: Path) -> Optional[BundleExtras]:
                 "-d",
                 str(temp_dir),
                 str(bundle_path),
-                str(EXTRAS_DIR),
+                tarball_name,
             ],
             check=True,
             capture_output=True,
@@ -62,6 +66,24 @@ def extract_bundle_extras(bundle_path: Path) -> Optional[BundleExtras]:
         raise BundleExtractionError(
             f"Failed to extract bundle extras from {bundle_path}: {exc.stderr.decode().strip()}"
         ) from exc
+
+    tarball_path = temp_dir / tarball_name
+    if not tarball_path.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+    # Extract the tarball contents
+    try:
+        with tarfile.open(tarball_path, "r:gz") as tar:
+            tar.extractall(path=temp_dir, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise BundleExtractionError(
+            f"Failed to extract tarball from bundle: {exc}"
+        ) from exc
+
+    # Remove the tarball after successful extraction
+    tarball_path.unlink(missing_ok=True)
 
     opkg_path = temp_dir / EXTRAS_DIR
     image_status = opkg_path / "status.image"

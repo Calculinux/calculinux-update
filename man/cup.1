@@ -14,13 +14,26 @@ cup, cup-hook, cup-postreboot \- Calculinux system update tools
 The Calculinux update system provides A/B slot-based system updates with automatic OPKG package reconciliation. It consists of three commands:
 .TP
 .B cup
-Main command-line interface for browsing, downloading, and installing RAUC update bundles.
+Main command-line interface for browsing, downloading, and installing RAUC update bundles with integrated package prefetching.
 .TP
 .B cup-hook
-RAUC hook invoked during slot-post-install phase to reconcile package status files.
+RAUC hook invoked during slot-post-install phase to reconcile package status files and queue post-reboot operations.
 .TP
 .B cup-postreboot
 Post-reboot service that completes package reconciliation after switching to new slot.
+.SS "Bundle Extras"
+Calculinux RAUC bundles include additional metadata beyond the root filesystem image. The
+.B bundle-extras.tar.gz
+file embedded in each bundle contains:
+.PP
+.nf
+.RS
+extras/opkg/etc/opkg/    # OPKG configuration from new image
+extras/opkg/status.image # Package status from new image
+.RE
+.fi
+.PP
+This metadata enables the prefetch system to download packages before installation, allowing offline reconciliation after reboot. If bundle extras are missing, prefetch is skipped and network access is required after reboot.
 .SH COMMANDS
 .SS "cup list"
 List available update bundles from configured channels.
@@ -54,7 +67,21 @@ Install a system update bundle.
 .RI [ --dry-run ]
 .RI [ --no-prefetch ]
 .PP
-Interactively select and install an update bundle. Prefetches packages that will be reconciled after reboot, then invokes RAUC to install the bundle. System reboot is required to complete the update.
+Interactively select and install an update bundle. The installation process:
+.PP
+1. Extracts bundle extras (OPKG configuration and package status)
+.br
+2. Computes reconciliation plan (packages to reinstall/upgrade)
+.br
+3. Prefetches packages that will be needed after reboot
+.br
+4. Invokes RAUC to install the bundle to inactive slot
+.br
+5. System reboot required to complete the update
+.PP
+After reboot, the
+.B cup-postreboot
+service automatically reconciles packages using prefetched .ipk files when available, falling back to network download if needed.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-channel " " \fICHANNEL\fR
@@ -75,7 +102,7 @@ Specify download destination directory. Only applies to download command. Defaul
 Perform all steps except the actual RAUC installation. Downloads bundle and performs prefetch but stops before invoking RAUC. Useful for testing.
 .TP
 .BR \-\-no\-prefetch
-Skip package prefetch phase. Post-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration.
+Skip package prefetch phase. Bundle extras will still be extracted for validation, but packages will not be pre-downloaded. Post-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration or when network is guaranteed available after reboot.
 .SH CONFIGURATION
 .SS "Configuration File"
 .I /etc/calculinux-update.toml
@@ -387,7 +414,15 @@ Pending operations are stored in:
 .fi
 .TP
 .B "Prefetch fails"
-OPKG may not be configured. Use
+OPKG may not be configured, or bundle extras may be missing. Check for bundle extras:
+.PP
+.nf
+.RS
+unsquashfs -ll bundle.raucb | grep bundle-extras.tar.gz
+.RE
+.fi
+.PP
+If bundle extras are missing, use
 .BR \-\-no\-prefetch :
 .PP
 .nf
@@ -397,6 +432,16 @@ sudo cup install --no-prefetch
 .fi
 .PP
 Ensure network access is available after reboot.
+.TP
+.B "Bundle extras corrupted"
+If bundle extras extraction fails, the bundle may be corrupted. Re-download:
+.PP
+.nf
+.RS
+sudo cup download --bundle <bundle-name>
+sudo cup install --bundle <bundle-name>
+.RE
+.fi
 .TP
 .B "Network unavailable after reboot"
 If prefetch succeeded, reconciliation should work offline using cached packages. If not, restore network access and restart the service:
