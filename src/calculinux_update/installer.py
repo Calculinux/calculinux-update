@@ -25,23 +25,23 @@ console = Console()
 def _check_disk_space(path: Path, required_bytes: int, margin: float = 1.5) -> None:
     """
     Check if sufficient disk space is available.
-    
+
     Args:
         path: Path to check (directory or file's parent)
         required_bytes: Minimum bytes needed
         margin: Safety margin multiplier (default 1.5 = 50% extra)
-    
+
     Raises:
         RuntimeError: If insufficient space available
     """
     if not path.exists():
         path = path.parent
-    
+
     try:
         stat = os.statvfs(path)
         available = stat.f_bavail * stat.f_frsize
         needed = int(required_bytes * margin)
-        
+
         if available < needed:
             raise RuntimeError(
                 f"Insufficient disk space: need {needed / (1024**2):.1f}MB, "

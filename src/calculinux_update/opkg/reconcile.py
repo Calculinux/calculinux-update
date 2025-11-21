@@ -14,7 +14,6 @@ from typing import Dict, Iterable, List, Optional
 from .status import (
     load_package_names,
     load_status_entries,
-    load_status_index,
     write_status_entries,
 )
 

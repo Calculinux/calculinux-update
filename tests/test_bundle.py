@@ -1,7 +1,7 @@
+import io
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
-import tarfile
-import io
 
 import calculinux_update.bundle as bundle
 
@@ -14,7 +14,7 @@ def test_extract_bundle_extras_success(tmp_path, monkeypatch):
         # cmd layout: unsquashfs -f -d <dest> <bundle> bundle-extras.tar.gz
         dest = Path(cmd[3])
         tarball_path = dest / "bundle-extras.tar.gz"
-        
+
         # Create a tarball with the expected structure
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
@@ -23,12 +23,12 @@ def test_extract_bundle_extras_success(tmp_path, monkeypatch):
             status_info = tarfile.TarInfo(name="extras/opkg/status.image")
             status_info.size = len(status_data)
             tar.addfile(status_info, io.BytesIO(status_data))
-            
+
             # Create extras/opkg/etc/opkg directory marker
             etc_info = tarfile.TarInfo(name="extras/opkg/etc/opkg")
             etc_info.type = tarfile.DIRTYPE
             tar.addfile(etc_info)
-        
+
         tarball_path.write_bytes(tar_buffer.getvalue())
         return SimpleNamespace(returncode=0)
 
@@ -47,7 +47,7 @@ def test_extract_bundle_extras_missing(tmp_path, monkeypatch):
     def fake_run(cmd, **_):
         dest = Path(cmd[3])
         tarball_path = dest / "bundle-extras.tar.gz"
-        
+
         # Create a tarball without status.image
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
@@ -55,7 +55,7 @@ def test_extract_bundle_extras_missing(tmp_path, monkeypatch):
             etc_info = tarfile.TarInfo(name="extras/opkg/etc/opkg")
             etc_info.type = tarfile.DIRTYPE
             tar.addfile(etc_info)
-        
+
         tarball_path.write_bytes(tar_buffer.getvalue())
         return SimpleNamespace(returncode=0)
 
@@ -93,7 +93,7 @@ def test_extract_bundle_extras_corrupted_tarball(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bundle.subprocess, "run", fake_run)
-    
+
     try:
         bundle.extract_bundle_extras(bundle_path)
         assert False, "Expected BundleExtractionError"

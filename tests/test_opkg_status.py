@@ -1,7 +1,5 @@
-from pathlib import Path
 
 from calculinux_update.opkg import status
-
 
 STATUS_SAMPLE = """Package: foo\nVersion: 1.0\n\nPackage: bar\nVersion: 2.0\n\n"""
 
@@ -15,7 +13,10 @@ def test_load_status_entries(tmp_path):
 
 def test_write_status_entries(tmp_path):
     path = tmp_path / "status"
-    entries = [status.StatusEntry(name="foo", raw="Package: foo\n"), status.StatusEntry(name="bar", raw="Package: bar\n")]
+    entries = [
+        status.StatusEntry(name="foo", raw="Package: foo\n"),
+        status.StatusEntry(name="bar", raw="Package: bar\n"),
+    ]
     status.write_status_entries(path, entries)
     assert "foo" in path.read_text()
 

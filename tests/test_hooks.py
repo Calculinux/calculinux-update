@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import calculinux_update.hooks as hooks
+from calculinux_update.opkg.reconcile import ReconcilePlan
 
 
 def test_find_cached_package(tmp_path, monkeypatch):
@@ -73,9 +74,11 @@ def test_run_slot_hook(monkeypatch, tmp_path):
     monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(mount))
 
     pruned = {}
-    monkeypatch.setattr(hooks, "prune_writable_status", lambda *_: pruned.setdefault("called", True))
+    monkeypatch.setattr(
+        hooks, "prune_writable_status", lambda *_: pruned.setdefault("called", True)
+    )
 
-    plan = hooks.ReconcilePlan(duplicates=["base"], reinstall=["foo"], upgrade=["bar"])
+    plan = ReconcilePlan(duplicates=["base"], reinstall=["foo"], upgrade=["bar"])
     monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
 
     recorded = {"duplicates": None, "reinstall": None, "upgrade": None}
@@ -160,7 +163,7 @@ def test_run_slot_hook_cleans_temp_snapshot(monkeypatch, tmp_path):
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
     monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(mount))
 
-    plan = hooks.ReconcilePlan(duplicates=[], reinstall=["foo"], upgrade=[])
+    plan = ReconcilePlan(duplicates=[], reinstall=["foo"], upgrade=[])
     monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
     monkeypatch.setattr(hooks, "_remove_duplicates", lambda *_: None)
     monkeypatch.setattr(hooks, "_write_pending", lambda *args, **kwargs: None)
@@ -178,15 +181,19 @@ def test_postreboot_entrypoint(monkeypatch, tmp_path):
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", rein)
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", upg)
     monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    
+
     # Mock rollback detection to return "not a rollback"
     monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
 
     calls = []
 
     monkeypatch.setattr(hooks, "_run_opkg", lambda args: True)
-    monkeypatch.setattr(hooks, "_install_reinstall_pkg", lambda pkg: calls.append(("install", pkg)) or True)
-    monkeypatch.setattr(hooks, "_upgrade_pkg", lambda pkg: calls.append(("upgrade", pkg)) or True)
+    monkeypatch.setattr(
+        hooks, "_install_reinstall_pkg", lambda pkg: calls.append(("install", pkg)) or True
+    )
+    monkeypatch.setattr(
+        hooks, "_upgrade_pkg", lambda pkg: calls.append(("upgrade", pkg)) or True
+    )
 
     hooks.postreboot_entrypoint()
     assert calls == [("install", "foo"), ("upgrade", "bar")]
@@ -338,7 +345,7 @@ RAUC_SLOT_STATE_appfs.0=active
 """
     result = SimpleNamespace(stdout=fake_output, returncode=0)
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: result)
-    
+
     slot_name = hooks._get_booted_slot_name()
     assert slot_name == "rootfs.0"
 
@@ -347,7 +354,7 @@ def test_get_booted_slot_name_rauc_not_found(monkeypatch):
     """Test handling when rauc binary is not found."""
     def fake_run(*args, **kwargs):
         raise FileNotFoundError("rauc not found")
-    
+
     monkeypatch.setattr("subprocess.run", fake_run)
     slot_name = hooks._get_booted_slot_name()
     assert slot_name is None
@@ -356,10 +363,10 @@ def test_get_booted_slot_name_rauc_not_found(monkeypatch):
 def test_get_booted_slot_name_rauc_error(monkeypatch):
     """Test handling when rauc command fails."""
     from subprocess import CalledProcessError
-    
+
     def fake_run(*args, **kwargs):
         raise CalledProcessError(1, "rauc")
-    
+
     monkeypatch.setattr("subprocess.run", fake_run)
     slot_name = hooks._get_booted_slot_name()
     assert slot_name is None
@@ -368,21 +375,27 @@ def test_get_booted_slot_name_rauc_error(monkeypatch):
 def test_get_current_boot_id_success(tmp_path, monkeypatch):
     """Test reading boot ID from /proc."""
     boot_id = "d359b438-b28b-416b-9270-257484a8a58e"
-    
+
     class FakePath:
         def read_text(self):
             return boot_id + "\n"
-    
-    monkeypatch.setattr(hooks.Path, "__new__", lambda cls, x: FakePath() if "boot_id" in str(x) else Path(x))
-    
+
+    monkeypatch.setattr(
+        hooks.Path,
+        "__new__",
+        lambda cls, x: FakePath() if "boot_id" in str(x) else Path(x),
+    )
+
     result = hooks._get_current_boot_id()
     assert result == boot_id
 
 
 def test_get_current_boot_id_missing(monkeypatch):
     """Test handling when boot ID file is missing."""
-    monkeypatch.setattr("pathlib.Path.read_text", lambda self: (_ for _ in ()).throw(OSError("not found")))
-    
+    monkeypatch.setattr(
+        "pathlib.Path.read_text", lambda self: (_ for _ in ()).throw(OSError("not found"))
+    )
+
     boot_id = hooks._get_current_boot_id()
     assert boot_id is None
 
@@ -393,24 +406,24 @@ def test_migrate_legacy_state_files(tmp_path, monkeypatch):
     legacy_upgrade = tmp_path / "legacy-upgrade"
     new_reinstall = tmp_path / "new-reinstall"
     new_upgrade = tmp_path / "new-upgrade"
-    
+
     legacy_reinstall.write_text("foo\nbar\n")
     legacy_upgrade.write_text("baz\n")
-    
+
     monkeypatch.setattr(hooks, "LEGACY_PENDING_REINSTALL", legacy_reinstall)
     monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE", legacy_upgrade)
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", new_reinstall)
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", new_upgrade)
     monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    
+
     hooks._migrate_legacy_state_files()
-    
+
     # Check migration happened
     assert new_reinstall.exists()
     assert new_upgrade.exists()
     assert new_reinstall.read_text() == "foo\nbar\n"
     assert new_upgrade.read_text() == "baz\n"
-    
+
     # Check old files removed
     assert not legacy_reinstall.exists()
     assert not legacy_upgrade.exists()
@@ -420,18 +433,18 @@ def test_migrate_legacy_state_files_skip_if_new_exists(tmp_path, monkeypatch):
     """Test that migration skips if new file already exists."""
     legacy = tmp_path / "legacy"
     new = tmp_path / "new"
-    
+
     legacy.write_text("old")
     new.write_text("existing")
-    
+
     monkeypatch.setattr(hooks, "LEGACY_PENDING_REINSTALL", legacy)
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", new)
     monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE", tmp_path / "none")
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "none2")
     monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    
+
     hooks._migrate_legacy_state_files()
-    
+
     # New file should not be overwritten
     assert new.read_text() == "existing"
     # Old file should remain
@@ -442,20 +455,20 @@ def test_save_pre_update_state(tmp_path, monkeypatch):
     """Test saving pre-update state."""
     writable_status = tmp_path / "status"
     writable_status.write_text("Package: foo\n\nPackage: bar\n\n")
-    
+
     pre_update_status = tmp_path / "pre-status"
     pre_update_slot = tmp_path / "pre-slot"
     updated_slot = tmp_path / "updated-slot"
-    
+
     monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable_status)
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", pre_update_status)
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", pre_update_slot)
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated_slot)
     monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
     monkeypatch.setattr(hooks, "_get_booted_slot_name", lambda: "rootfs.0")
-    
+
     hooks._save_pre_update_state("rootfs.1")
-    
+
     assert pre_update_status.exists()
     assert pre_update_slot.exists()
     assert updated_slot.exists()
@@ -467,18 +480,18 @@ def test_detect_rollback_forward_update(tmp_path, monkeypatch):
     """Test detecting a forward update (not a rollback)."""
     pre_slot = tmp_path / "pre-slot"
     updated_slot = tmp_path / "updated-slot"
-    
+
     pre_slot.write_text("rootfs.0\n")
     updated_slot.write_text("rootfs.1\n")
-    
+
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", pre_slot)
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated_slot)
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "none")
     monkeypatch.setattr(hooks, "_get_booted_slot_name", lambda: "rootfs.1")
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "abc123")
-    
+
     result = hooks._detect_rollback()
-    
+
     assert result["is_rollback"] is False
     assert "forward update" in result["reason"]
 
@@ -487,18 +500,18 @@ def test_detect_rollback_actual_rollback(tmp_path, monkeypatch):
     """Test detecting an actual rollback."""
     pre_slot = tmp_path / "pre-slot"
     updated_slot = tmp_path / "updated-slot"
-    
+
     pre_slot.write_text("rootfs.0\n")
     updated_slot.write_text("rootfs.1\n")
-    
+
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", pre_slot)
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated_slot)
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "none")
     monkeypatch.setattr(hooks, "_get_booted_slot_name", lambda: "rootfs.0")
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "abc123")
-    
+
     result = hooks._detect_rollback()
-    
+
     assert result["is_rollback"] is True
     assert "rollback detected" in result["reason"]
 
@@ -508,18 +521,18 @@ def test_detect_rollback_already_processed(tmp_path, monkeypatch):
     pre_slot = tmp_path / "pre-slot"
     updated_slot = tmp_path / "updated-slot"
     boot_id_file = tmp_path / "boot-id"
-    
+
     pre_slot.write_text("rootfs.0\n")
     updated_slot.write_text("rootfs.1\n")
     boot_id_file.write_text("abc123\n")
-    
+
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", pre_slot)
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated_slot)
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", boot_id_file)
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "abc123")
-    
+
     result = hooks._detect_rollback()
-    
+
     assert result["is_rollback"] is False
     assert "already processed" in result["reason"]
 
@@ -528,9 +541,9 @@ def test_detect_rollback_no_state_files(tmp_path, monkeypatch):
     """Test behavior when state files don't exist."""
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", tmp_path / "none")
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", tmp_path / "none")
-    
+
     result = hooks._detect_rollback()
-    
+
     assert result["is_rollback"] is False
     assert "no update state" in result["reason"]
 
@@ -539,10 +552,10 @@ def test_handle_rollback_success(tmp_path, monkeypatch):
     """Test successful rollback handling."""
     pre_status = tmp_path / "pre-status"
     writable_status = tmp_path / "status"
-    
+
     pre_status.write_text("Package: foo\nVersion: 1.0\n\nPackage: bar\nVersion: 2.0\n\n")
     writable_status.write_text("Package: baz\n\n")
-    
+
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", pre_status)
     monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable_status)
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", tmp_path / "slot")
@@ -550,9 +563,9 @@ def test_handle_rollback_success(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "boot")
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", tmp_path / "reinstall")
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "upgrade")
-    
+
     result = hooks._handle_rollback()
-    
+
     assert result is True
     # Writable status should be restored
     content = writable_status.read_text()
@@ -563,9 +576,9 @@ def test_handle_rollback_success(tmp_path, monkeypatch):
 def test_handle_rollback_missing_pre_status(tmp_path, monkeypatch):
     """Test rollback handling when pre-update status is missing."""
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", tmp_path / "none")
-    
+
     result = hooks._handle_rollback()
-    
+
     assert result is False
 
 
@@ -579,19 +592,19 @@ def test_cleanup_update_state(tmp_path, monkeypatch):
         tmp_path / "reinstall",
         tmp_path / "upgrade",
     ]
-    
+
     for f in files:
         f.write_text("content")
-    
+
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", files[0])
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", files[1])
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", files[2])
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", files[3])
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", files[4])
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", files[5])
-    
+
     hooks._cleanup_update_state()
-    
+
     for f in files:
         assert not f.exists()
 
@@ -600,9 +613,9 @@ def test_atomic_write(tmp_path):
     """Test atomic file writing."""
     target = tmp_path / "test.txt"
     content = "test content\n"
-    
+
     hooks._atomic_write(target, content)
-    
+
     assert target.exists()
     assert target.read_text() == content
 
@@ -611,9 +624,9 @@ def test_atomic_write_creates_parent(tmp_path):
     """Test that atomic write creates parent directory if needed."""
     target = tmp_path / "subdir" / "test.txt"
     content = "test content\n"
-    
+
     hooks._atomic_write(target, content)
-    
+
     assert target.exists()
     assert target.read_text() == content
 
@@ -624,11 +637,11 @@ def test_state_lock_basic(tmp_path, monkeypatch):
     state_dir.mkdir()
     monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
     monkeypatch.setattr(hooks, "LOCK_FILE", state_dir / ".lock")
-    
+
     acquired = False
     with hooks._state_lock():
         acquired = True
-    
+
     assert acquired
 
 
@@ -639,7 +652,7 @@ def test_state_lock_prevents_concurrent_access(tmp_path, monkeypatch):
     lock_file = state_dir / ".lock"
     monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
     monkeypatch.setattr(hooks, "LOCK_FILE", lock_file)
-    
+
     # Just verify the lock file gets created and the context manager works
     with hooks._state_lock():
         assert lock_file.exists()
@@ -649,15 +662,15 @@ def test_detect_rollback_cleans_up_on_boot_id_match(tmp_path, monkeypatch):
     """Test that state is cleaned up when boot ID indicates already processed."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    
+
     pre_update_slot = state_dir / "pre-slot"
     updated_slot = state_dir / "updated-slot"
     boot_id_file = state_dir / "boot-id"
-    
+
     pre_update_slot.write_text("rootfs.0\n")
     updated_slot.write_text("rootfs.1\n")
     boot_id_file.write_text("abc-123\n")
-    
+
     monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
     monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", pre_update_slot)
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated_slot)
@@ -665,12 +678,12 @@ def test_detect_rollback_cleans_up_on_boot_id_match(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-status")
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "reinstall")
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "upgrade")
-    
+
     # Mock boot ID to match
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "abc-123")
-    
+
     result = hooks._detect_rollback()
-    
+
     assert result["is_rollback"] is False
     assert "already processed" in result["reason"]
     # Files should be cleaned up

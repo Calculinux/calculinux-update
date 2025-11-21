@@ -18,7 +18,9 @@ def test_compute_reconcile_plan(tmp_path):
     write_status(writable_status, ["base", "overlay"])
     write_status(current_status, ["missing", "keep"])
 
-    plan = reconcile.compute_reconcile_plan(image_status, writable_status, current_status=current_status)
+    plan = reconcile.compute_reconcile_plan(
+        image_status, writable_status, current_status=current_status
+    )
     assert plan.duplicates == ["base"]
     assert plan.reinstall == ["missing"]
     assert plan.upgrade == ["base", "overlay"]
@@ -38,7 +40,11 @@ def test_parse_shell_assignments():
 
 
 def test_find_booted_device():
-    env = {"RAUC_SLOT_STATE_1": "inactive", "RAUC_SLOT_STATE_2": "booted", "RAUC_SLOT_DEVICE_2": "/dev/slotB"}
+    env = {
+        "RAUC_SLOT_STATE_1": "inactive",
+        "RAUC_SLOT_STATE_2": "booted",
+        "RAUC_SLOT_DEVICE_2": "/dev/slotB",
+    }
     device = reconcile._find_booted_device(env)
     # Should find the device for the booted slot
     assert device is not None

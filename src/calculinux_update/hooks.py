@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from .opkg.reconcile import (
-    ReconcilePlan,
     compute_reconcile_plan,
     prune_writable_status,
     snapshot_current_slot_status,
@@ -55,7 +54,7 @@ LEGACY_PENDING_UPGRADE = Path("/var/lib/opkg/opkg-status-hook.pending-upgrades")
 def _state_lock():
     """
     Acquire exclusive lock on state directory to prevent concurrent operations.
-    
+
     This ensures that only one update/rollback operation can manipulate state
     files at a time, preventing race conditions.
     """
@@ -83,7 +82,7 @@ def _state_lock():
 def _atomic_write(path: Path, content: str) -> None:
     """
     Write content to file atomically using tempfile + rename.
-    
+
     This prevents partial writes from being visible if the process is
     interrupted or the system loses power.
     """
@@ -93,7 +92,7 @@ def _atomic_write(path: Path, content: str) -> None:
         # In test environments or restricted permissions, continue anyway
         # The subsequent operations will fail if truly not writable
         pass
-    
+
     # Create temp file in same directory to ensure same filesystem
     fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -129,12 +128,12 @@ def _ensure_state_dir() -> None:
 def _migrate_legacy_state_files() -> None:
     """Migrate state files from old /var/lib/opkg/ location to new location."""
     _ensure_state_dir()
-    
+
     migrations = [
         (LEGACY_PENDING_REINSTALL, PENDING_REINSTALL_FILE),
         (LEGACY_PENDING_UPGRADE, PENDING_UPGRADE_FILE),
     ]
-    
+
     for old_path, new_path in migrations:
         if old_path.exists() and not new_path.exists():
             LOG.info("migrating %s -> %s", old_path, new_path)
@@ -185,17 +184,17 @@ def _cleanup_update_state() -> None:
         PENDING_REINSTALL_FILE,
         PENDING_UPGRADE_FILE,
     ]
-    
+
     for path in state_files:
         path.unlink(missing_ok=True)
-    
+
     LOG.debug("cleaned up update state files")
 
 
 def _save_pre_update_state(updated_slot: str) -> None:
     """Save current state before update for rollback detection."""
     _ensure_state_dir()
-    
+
     # Critical: Record which slot we're updating to
     try:
         _atomic_write(UPDATED_SLOT_NAME, updated_slot + "\n")
@@ -203,7 +202,7 @@ def _save_pre_update_state(updated_slot: str) -> None:
     except (OSError, IOError) as e:
         LOG.error("failed to save updated slot (critical): %s", e)
         raise
-    
+
     # Critical: Record which slot we're currently booted from
     current_slot = _get_booted_slot_name()
     if current_slot:
@@ -215,7 +214,7 @@ def _save_pre_update_state(updated_slot: str) -> None:
             raise
     else:
         LOG.warning("cannot determine current slot - rollback detection may be impaired")
-    
+
     # Best-effort: Save current writable status for package-level rollback
     if WRITABLE_STATUS.exists():
         try:
@@ -233,13 +232,13 @@ def _save_pre_update_state(updated_slot: str) -> None:
 def _detect_rollback() -> Dict[str, any]:
     """
     Detect if we've rolled back instead of moving forward.
-    
+
     Returns dict with 'is_rollback' (bool) and 'reason' (str).
     """
     # Check if we have the necessary state files
     if not PRE_UPDATE_SLOT_NAME.exists() or not UPDATED_SLOT_NAME.exists():
         return {"is_rollback": False, "reason": "no update state found"}
-    
+
     # Check boot ID to avoid re-processing same boot
     current_boot_id = _get_current_boot_id()
     if current_boot_id and UPDATE_BOOT_ID.exists():
@@ -248,21 +247,21 @@ def _detect_rollback() -> Dict[str, any]:
             LOG.debug("already processed this boot, cleaning up state")
             _cleanup_update_state()
             return {"is_rollback": False, "reason": "already processed this boot"}
-    
+
     # Get slot names
     try:
         pre_update_slot = PRE_UPDATE_SLOT_NAME.read_text().strip()
         updated_slot = UPDATED_SLOT_NAME.read_text().strip()
         booted_slot = _get_booted_slot_name()
-        
+
         if not booted_slot:
             return {"is_rollback": False, "reason": "cannot determine booted slot"}
-        
+
         LOG.debug(
             "slot comparison: pre=%s, updated=%s, booted=%s",
             pre_update_slot, updated_slot, booted_slot
         )
-        
+
         # Primary detection: slot name comparison
         if booted_slot == updated_slot:
             # Forward update: booted into the updated slot
@@ -271,16 +270,23 @@ def _detect_rollback() -> Dict[str, any]:
             # Rollback: booted back into the pre-update slot
             return {
                 "is_rollback": True,
-                "reason": f"rollback detected (booted {booted_slot} == pre-update {pre_update_slot})"
+                "reason": (
+                    f"rollback detected (booted {booted_slot} == "
+                    f"pre-update {pre_update_slot})"
+                ),
             }
         else:
             # Ambiguous: booted into a different slot entirely
             # Fall back to package comparison
             if PRE_UPDATE_WRITABLE_STATUS.exists():
-                saved_packages = {e["Package"] for e in load_status_entries(PRE_UPDATE_WRITABLE_STATUS)}
-                current_packages = {e["Package"] for e in load_status_entries(WRITABLE_STATUS)}
+                saved_packages = {
+                    e["Package"] for e in load_status_entries(PRE_UPDATE_WRITABLE_STATUS)
+                }
+                current_packages = {
+                    e["Package"] for e in load_status_entries(WRITABLE_STATUS)
+                }
                 missing = saved_packages - current_packages
-                
+
                 if missing:
                     LOG.warning(
                         "ambiguous slot state but %d packages missing, treating as rollback",
@@ -290,12 +296,15 @@ def _detect_rollback() -> Dict[str, any]:
                         "is_rollback": True,
                         "reason": f"package comparison ({len(missing)} packages missing)"
                     }
-            
+
             return {
                 "is_rollback": False,
-                "reason": f"ambiguous slot (booted {booted_slot}, expected {updated_slot} or {pre_update_slot})"
+                "reason": (
+                    f"ambiguous slot (booted {booted_slot}, expected "
+                    f"{updated_slot} or {pre_update_slot})"
+                ),
             }
-    
+
     except (OSError, IOError) as e:
         LOG.warning("error during rollback detection: %s", e)
         return {"is_rollback": False, "reason": f"error: {e}"}
@@ -304,32 +313,32 @@ def _detect_rollback() -> Dict[str, any]:
 def _handle_rollback() -> bool:
     """
     Handle rollback by restoring pre-update package state.
-    
+
     Returns True if successful, False otherwise.
     """
     if not PRE_UPDATE_WRITABLE_STATUS.exists():
         LOG.warning("cannot restore: pre-update status not found")
         return False
-    
+
     try:
         # Load saved pre-update state
         pre_update_entries = load_status_entries(PRE_UPDATE_WRITABLE_STATUS)
         LOG.info("restoring pre-update state (%d packages)", len(pre_update_entries))
-        
+
         # Write to temp file first for atomicity
         temp_status = WRITABLE_STATUS.with_suffix(".rollback.tmp")
         write_status_entries(temp_status, pre_update_entries)
-        
+
         # Atomic replace
         temp_status.replace(WRITABLE_STATUS)
         LOG.info("restored pre-update package state")
-        
+
         # Only clean up after successful restore
         _cleanup_update_state()
         LOG.info("rollback handling complete")
-        
+
         return True
-    
+
     except (OSError, IOError) as e:
         LOG.error("failed to restore pre-update state: %s", e)
         # Don't clean up state files on failure - leave for debugging/retry
@@ -341,7 +350,7 @@ def hook_entrypoint() -> None:
     if os.geteuid() != 0:
         LOG.error("hook must run as root")
         raise SystemExit(1)
-    
+
     parser = argparse.ArgumentParser(description="Calculinux RAUC hook")
     parser.add_argument("hook", help="Hook phase name from RAUC")
     parser.add_argument("slot", help="Slot identifier")
@@ -372,12 +381,20 @@ def run_slot_hook(hook: str, slot: str) -> None:
     # Save pre-update state for rollback detection
     _save_pre_update_state(slot)
 
-    current_status = CURRENT_IMAGE_STATUS if CURRENT_IMAGE_STATUS.exists() else snapshot_current_slot_status()
+    current_status = (
+        CURRENT_IMAGE_STATUS
+        if CURRENT_IMAGE_STATUS.exists()
+        else snapshot_current_slot_status()
+    )
     cleanup_snapshot = isinstance(current_status, Path) and current_status != CURRENT_IMAGE_STATUS
 
     try:
         _prune_writable_status(image_status)
-        plan = compute_reconcile_plan(image_status=image_status, writable_status=WRITABLE_STATUS, current_status=current_status)
+        plan = compute_reconcile_plan(
+            image_status=image_status,
+            writable_status=WRITABLE_STATUS,
+            current_status=current_status,
+        )
     finally:
         if cleanup_snapshot and isinstance(current_status, Path):
             current_status.unlink(missing_ok=True)
@@ -392,12 +409,12 @@ def postreboot_entrypoint() -> None:
     if os.geteuid() != 0:
         LOG.error("post-reboot service must run as root")
         raise SystemExit(1)
-    
+
     # Use locking to prevent concurrent operations
     with _state_lock():
         # Migrate legacy state files if they exist
         _migrate_legacy_state_files()
-        
+
         # Check for rollback first
         rollback_info = _detect_rollback()
         if rollback_info["is_rollback"]:
@@ -408,7 +425,7 @@ def postreboot_entrypoint() -> None:
             else:
                 LOG.error("rollback handling failed")
                 raise SystemExit(1)
-        
+
         # Not a rollback - proceed with forward update processing
         if not PENDING_REINSTALL_FILE.exists() and not PENDING_UPGRADE_FILE.exists():
             return
@@ -422,7 +439,7 @@ def postreboot_entrypoint() -> None:
 
         if reinstall_status and upgrade_status:
             LOG.info("post-reboot package reconciliation complete")
-            
+
             # Save boot ID to prevent re-processing
             current_boot_id = _get_current_boot_id()
             if current_boot_id:
@@ -431,7 +448,7 @@ def postreboot_entrypoint() -> None:
                     _atomic_write(UPDATE_BOOT_ID, current_boot_id + "\n")
                 except (OSError, IOError) as e:
                     LOG.warning("failed to save boot ID: %s", e)
-            
+
             # Clean up state files except boot ID (kept to prevent re-processing)
             for path in [PRE_UPDATE_WRITABLE_STATUS, PRE_UPDATE_SLOT_NAME, UPDATED_SLOT_NAME]:
                 path.unlink(missing_ok=True)
@@ -449,7 +466,12 @@ def _prune_writable_status(image_status: Path) -> None:
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
     for pkg in duplicates:
         LOG.info("removing duplicate package %s", pkg)
-        result = subprocess.run(["opkg", "remove", "--nodeps", pkg], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(
+            ["opkg", "remove", "--nodeps", pkg],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         if result.returncode != 0:
             LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
 
@@ -500,7 +522,9 @@ def _upgrade_pkg(pkg: str) -> bool:
 
 
 def _run_opkg(args: List[str]) -> bool:
-    result = subprocess.run(["opkg", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(
+        ["opkg", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     if result.returncode != 0:
         LOG.warning("opkg %s failed: %s", " ".join(args), result.stderr.strip())
         return False
@@ -510,7 +534,11 @@ def _run_opkg(args: List[str]) -> bool:
 def _find_cached_package(pkg: str) -> Optional[Path]:
     if not PREFETCH_CACHE_DIR.exists():
         return None
-    candidates = sorted(PREFETCH_CACHE_DIR.glob(f"{pkg}_*.ipk"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = sorted(
+        PREFETCH_CACHE_DIR.glob(f"{pkg}_*.ipk"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     for candidate in candidates:
         if candidate.is_file():
             return candidate

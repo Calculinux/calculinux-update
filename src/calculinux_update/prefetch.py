@@ -13,7 +13,7 @@ from typing import List, Optional, Sequence
 
 from rich.console import Console
 
-from .bundle import BundleExtras, BundleExtractionError, extract_bundle_extras
+from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
 from .opkg.reconcile import ReconcilePlan, compute_reconcile_plan, snapshot_current_slot_status
 
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
@@ -34,7 +34,9 @@ class PrefetchError(RuntimeError):
     pass
 
 
-def prefetch_for_bundle(bundle_path: Path, bundle_sha256: str, console: Optional[Console] = None) -> PrefetchResult:
+def prefetch_for_bundle(
+    bundle_path: Path, bundle_sha256: str, console: Optional[Console] = None
+) -> PrefetchResult:
     console = console or Console(stderr=True)
     try:
         extras = extract_bundle_extras(bundle_path)
@@ -50,11 +52,17 @@ def prefetch_for_bundle(bundle_path: Path, bundle_sha256: str, console: Optional
         extras.cleanup()
 
 
-def _prefetch_with_extras(extras: BundleExtras, bundle_sha256: str, console: Console) -> PrefetchResult:
+def _prefetch_with_extras(
+    extras: BundleExtras, bundle_sha256: str, console: Console
+) -> PrefetchResult:
     if not WRITABLE_STATUS.exists():
         return PrefetchResult(skipped=True, reason=f"{WRITABLE_STATUS} missing")
 
-    current_status = CURRENT_IMAGE_STATUS if CURRENT_IMAGE_STATUS.exists() else snapshot_current_slot_status()
+    current_status = (
+        CURRENT_IMAGE_STATUS
+        if CURRENT_IMAGE_STATUS.exists()
+        else snapshot_current_slot_status()
+    )
     cleanup_snapshot = isinstance(current_status, Path) and current_status != CURRENT_IMAGE_STATUS
 
     try:
@@ -77,7 +85,10 @@ def _prefetch_with_extras(extras: BundleExtras, bundle_sha256: str, console: Con
         return PrefetchResult(skipped=True, reason=str(exc))
     _write_state(bundle_sha256, plan)
     console.print(
-        f"[green]Prefetched[/] {downloaded}/{len(plan.reinstall)} reinstall packages into {PREFETCH_CACHE_DIR}",
+        (
+            f"[green]Prefetched[/] {downloaded}/{len(plan.reinstall)} "
+            f"reinstall packages into {PREFETCH_CACHE_DIR}"
+        ),
         highlight=False,
     )
     return PrefetchResult(downloaded=downloaded, planned=len(plan.reinstall))

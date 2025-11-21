@@ -359,7 +359,7 @@ def install(
     ),
 ):
     """Download and install a bundle via RAUC."""
-    
+
     # Check for root access (install requires root)
     _require_root("Installing bundles")
 

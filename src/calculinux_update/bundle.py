@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tarfile
@@ -43,7 +42,7 @@ def extract_bundle_extras(bundle_path: Path) -> Optional[BundleExtras]:
 
     temp_dir = Path(tempfile.mkdtemp(prefix="cup-bundle-"))
     tarball_name = "bundle-extras.tar.gz"
-    
+
     try:
         # Extract the tarball from the bundle
         subprocess.run(

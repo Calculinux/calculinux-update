@@ -189,23 +189,24 @@ def test_download_restarts_when_range_ignored(monkeypatch, tmp_path):
 def test_check_disk_space_sufficient(tmp_path):
     """Test disk space check when sufficient space available."""
     from calculinux_update.installer import _check_disk_space
-    
+
     # Should not raise for small file
     _check_disk_space(tmp_path, 1024)
 
 
 def test_check_disk_space_insufficient(tmp_path, monkeypatch):
     """Test disk space check when insufficient space."""
-    from calculinux_update.installer import _check_disk_space
     import os
-    
+
+    from calculinux_update.installer import _check_disk_space
+
     # Mock statvfs to return very little space
     class MockStatVFS:
         f_bavail = 10  # Only 10 blocks available
         f_frsize = 1024  # 1KB block size
-    
+
     monkeypatch.setattr(os, "statvfs", lambda path: MockStatVFS())
-    
+
     # Should raise when requesting 1GB with insufficient space
     with pytest.raises(RuntimeError, match="Insufficient disk space"):
         _check_disk_space(tmp_path, 1024 * 1024 * 1024)
