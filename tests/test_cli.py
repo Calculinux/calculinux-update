@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from calculinux_update.cli import (
@@ -14,6 +15,18 @@ from calculinux_update.config import ChannelConfig, UpdateConfig
 from calculinux_update.mirror import BundleInfo
 
 runner = CliRunner()
+
+
+@pytest.fixture
+def mock_root(monkeypatch):
+    """Mock root check - use explicitly in tests that need root."""
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+
+
+@pytest.fixture
+def mock_non_root(monkeypatch):
+    """Mock non-root check - use to test permission denial."""
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
 
 
 class StubMirror:
@@ -108,7 +121,7 @@ def test_cli_download_with_bundle(monkeypatch, tmp_path):
     assert expected_sha == bundle.sha256
 
 
-def test_cli_install_triggers_run(monkeypatch, tmp_path):
+def test_cli_install_triggers_run(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -148,7 +161,7 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path):
     assert installer.download_calls[0][1] == bundle.sha256
 
 
-def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path):
+def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -191,7 +204,7 @@ def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path):
     assert result.exit_code == 0
 
 
-def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path):
+def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -225,7 +238,7 @@ def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path):
     assert result.exit_code == 0
 
 
-def test_cli_install_runs_prefetch(monkeypatch, tmp_path):
+def test_cli_install_runs_prefetch(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -268,7 +281,7 @@ def test_cli_install_runs_prefetch(monkeypatch, tmp_path):
     assert prefetch_calls
 
 
-def test_cli_install_no_prefetch_flag(monkeypatch, tmp_path):
+def test_cli_install_no_prefetch_flag(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -313,7 +326,7 @@ def test_cli_install_no_prefetch_flag(monkeypatch, tmp_path):
     assert not calls
 
 
-def test_cli_install_prefetch_failure(monkeypatch, tmp_path):
+def test_cli_install_prefetch_failure(monkeypatch, tmp_path, mock_root):
     config = build_config(tmp_path)
     bundle = build_bundle(config)
     installer = StubInstaller(config)
@@ -353,6 +366,22 @@ def test_cli_install_prefetch_failure(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "Prefetch failed" in result.stdout
 
+
+
+def test_install_requires_root(monkeypatch, tmp_path, mock_non_root):
+    """Test that install command requires root privileges."""
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+
+    result = runner.invoke(app, ["install", "-b", "bundle", "-y"])
+    assert result.exit_code == 1
+    assert "root" in result.stdout.lower() or "root" in result.stderr.lower()
 
 
 def test_calculate_page_size():

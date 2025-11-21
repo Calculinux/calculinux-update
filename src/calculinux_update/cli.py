@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,6 +18,14 @@ from .prefetch import PrefetchError, prefetch_for_bundle
 
 app = typer.Typer(help="Calculinux RAUC update helper")
 console = Console()
+
+
+def _require_root(operation: str) -> None:
+    """Check if running as root, exit with error if not."""
+    if os.geteuid() != 0:
+        console.print(f"[red]Error:[/] {operation} requires root privileges")
+        console.print("Please run with sudo or as root")
+        raise typer.Exit(code=1)
 
 
 def _load_config(config_path: Optional[Path]) -> UpdateConfig:
@@ -350,6 +359,9 @@ def install(
     ),
 ):
     """Download and install a bundle via RAUC."""
+    
+    # Check for root access (install requires root)
+    _require_root("Installing bundles")
 
     config = _load_config(config_path)
     if not dry_run:

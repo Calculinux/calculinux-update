@@ -22,6 +22,36 @@ from .mirror import BundleInfo
 console = Console()
 
 
+def _check_disk_space(path: Path, required_bytes: int, margin: float = 1.5) -> None:
+    """
+    Check if sufficient disk space is available.
+    
+    Args:
+        path: Path to check (directory or file's parent)
+        required_bytes: Minimum bytes needed
+        margin: Safety margin multiplier (default 1.5 = 50% extra)
+    
+    Raises:
+        RuntimeError: If insufficient space available
+    """
+    if not path.exists():
+        path = path.parent
+    
+    try:
+        stat = os.statvfs(path)
+        available = stat.f_bavail * stat.f_frsize
+        needed = int(required_bytes * margin)
+        
+        if available < needed:
+            raise RuntimeError(
+                f"Insufficient disk space: need {needed / (1024**2):.1f}MB, "
+                f"have {available / (1024**2):.1f}MB available at {path}"
+            )
+    except (OSError, AttributeError) as e:
+        # OSError: filesystem issue, AttributeError: Windows doesn't have statvfs
+        console.print(f"[yellow]Warning:[/] Could not check disk space: {e}")
+
+
 @dataclass(slots=True)
 class DownloadResult:
     bundle: BundleInfo
@@ -52,6 +82,10 @@ class UpdateInstaller:
         dest_path = self.config.download_dir / bundle.name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         expected = (expected_sha256 or bundle.sha256 or "").lower() or None
+
+        # Check disk space before downloading
+        if bundle.size_bytes:
+            _check_disk_space(dest_path.parent, bundle.size_bytes)
 
         if dest_path.exists() and expected:
             existing_hash = _compute_sha256(dest_path)
