@@ -11,19 +11,19 @@ cup, cup-hook, cup-postreboot \- Calculinux system update tools
 .br
 .B cup-postreboot
 .SH DESCRIPTION
-The Calculinux update system provides A/B slot-based system updates with automatic OPKG package reconciliation. It consists of three commands:
+The Calculinux update system provides A/B slot\-based system updates with automatic OPKG package reconciliation. It consists of three commands:
 .TP
 .B cup
-Main command-line interface for browsing, downloading, and installing RAUC update bundles with integrated package prefetching.
+Main command\-line interface for browsing, downloading, and installing RAUC update bundles with integrated package prefetching.
 .TP
-.B cup-hook
-RAUC hook invoked during slot-post-install phase to reconcile package status files and queue post-reboot operations.
+.B cup\-hook
+RAUC hook invoked during slot\-post\-install phase to reconcile package status files and queue post\-reboot operations.
 .TP
-.B cup-postreboot
-Post-reboot service that completes package reconciliation after switching to new slot.
+.B cup\-postreboot
+Post\-reboot service that completes package reconciliation after switching to new slot.
 .SS "Bundle Extras"
 Calculinux RAUC bundles include additional metadata beyond the root filesystem image. The
-.B bundle-extras.tar.gz
+.B bundle\-extras.tar.gz
 file embedded in each bundle contains:
 .PP
 .nf
@@ -54,7 +54,7 @@ Download an update bundle without installing it.
 .RI [ --destination
 .IR DIR ]
 .PP
-Downloads the specified bundle to the cache directory (default: /var/cache/calculinux-update/) for later installation.
+Downloads the specified bundle to the cache directory (default: /var/cache/calculinux\-update/) for later installation.
 .SS "cup install"
 Install a system update bundle.
 .PP
@@ -80,7 +80,7 @@ Interactively select and install an update bundle. The installation process:
 5. System reboot required to complete the update
 .PP
 After reboot, the
-.B cup-postreboot
+.B cup\-postreboot
 service automatically reconciles packages using prefetched .ipk files when available, falling back to network download if needed.
 .SH OPTIONS
 .TP
@@ -96,16 +96,16 @@ Specify which bundle to download or install. If not specified for install comman
 Skip confirmation prompts. Useful for automation. Automatically proceeds with installation without user confirmation.
 .TP
 .BR \-d ", " \-\-destination " " \fIDIR\fR
-Specify download destination directory. Only applies to download command. Defaults to /var/cache/calculinux-update/.
+Specify download destination directory. Only applies to download command. Defaults to /var/cache/calculinux\-update/.
 .TP
 .BR \-\-dry\-run
 Perform all steps except the actual RAUC installation. Downloads bundle and performs prefetch but stops before invoking RAUC. Useful for testing.
 .TP
 .BR \-\-no\-prefetch
-Skip package prefetch phase. Bundle extras will still be extracted for validation, but packages will not be pre-downloaded. Post-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration or when network is guaranteed available after reboot.
+Skip package prefetch phase. Bundle extras will still be extracted for validation, but packages will not be pre\-downloaded. Post\-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration or when network is guaranteed available after reboot.
 .SH CONFIGURATION
 .SS "Configuration File"
-.I /etc/calculinux-update.toml
+.I /etc/calculinux\-update.toml
 .PP
 TOML configuration file defining update channels and mirror settings.
 .PP
@@ -148,20 +148,20 @@ file at each channel path with the format:
 .nf
 .RS
 # timestamp filename size sha256
-1732147200 calculinux-bundle-20241120.raucb 123456789 abc123...
+1732147200 calculinux\-bundle\-20241120.raucb 123456789 abc123...
 .RE
 .fi
 .SH PACKAGE RECONCILIATION
 .SS "The Problem"
-Calculinux uses dual-layer package management:
+Calculinux uses dual\-layer package management:
 .TP
 .B Base layer
-Read-only packages baked into the RAUC image (
+Read\-only packages baked into the RAUC image (
 .IR /var/lib/opkg/status.image
 ).
 .TP
 .B Overlay layer
-User-installed packages in writable storage (
+User\-installed packages in writable storage (
 .IR /var/lib/opkg/status
 ).
 .PP
@@ -169,7 +169,7 @@ When updating the base image, three problems arise:
 .TP
 1.
 .B Shadowing
-\- User-installed packages that now exist in the new base (duplicates).
+\- User\-installed packages that now exist in the new base (duplicates).
 .TP
 2.
 .B Missing packages
@@ -184,48 +184,48 @@ The update system solves these problems in three phases:
 .B Phase 1: Prefetch (before reboot)
 .B cup install
 downloads packages that will need reinstalling or upgrading after reboot. Packages are cached in
-.IR /var/cache/calculinux-update/opkg-cache/ .
+.IR /var/cache/calculinux\-update/opkg\-cache/ .
 This enables offline reconciliation.
 .TP
 .B Phase 2: Hook (during RAUC install)
-.B cup-hook
-is invoked by RAUC during slot-post-install. It mounts the new slot, compares package status files, removes duplicate packages from overlay, and queues pending operations:
+.B cup\-hook
+is invoked by RAUC during slot\-post\-install. It mounts the new slot, compares package status files, removes duplicate packages from overlay, and queues pending operations:
 .RS
 .IP \(bu 2
-.I /var/lib/opkg/opkg-status-hook.pending-reinstalls
+.I /var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
 .IP \(bu
-.I /var/lib/opkg/opkg-status-hook.pending-upgrades
+.I /var/lib/opkg/opkg\-status\-hook.pending\-upgrades
 .RE
 .TP
-.B Phase 3: Post-reboot (after slot switch)
-.B cup-postreboot
+.B Phase 3: Post\-reboot (after slot switch)
+.B cup\-postreboot
 runs on first boot into new slot (via systemd service). It updates package feeds, reinstalls missing packages (using cached .ipk files if available), upgrades all overlay packages to match new base versions, and cleans up pending files.
 .SH FILES
 .TP
-.I /etc/calculinux-update.toml
+.I /etc/calculinux\-update.toml
 Main configuration file defining channels and mirror settings.
 .TP
-.I /var/cache/calculinux-update/
+.I /var/cache/calculinux\-update/
 Cache directory for downloaded bundles and prefetched packages.
 .TP
-.I /var/cache/calculinux-update/opkg-cache/
+.I /var/cache/calculinux\-update/opkg\-cache/
 Prefetched .ipk package files for offline reconciliation.
 .TP
 .I /var/lib/opkg/status
 Current installed package status (writable overlay).
 .TP
 .I /var/lib/opkg/status.image
-Base image package status (read-only).
+Base image package status (read\-only).
 .TP
-.I /var/lib/opkg/opkg-status-hook.pending-reinstalls
+.I /var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
 Packages queued for reinstall after reboot.
 .TP
-.I /var/lib/opkg/opkg-status-hook.pending-upgrades
+.I /var/lib/opkg/opkg\-status\-hook.pending\-upgrades
 Packages queued for upgrade after reboot.
 .TP
-.I /lib/systemd/system/calculinux-update-postreboot.service
+.I /lib/systemd/system/calculinux\-update\-postreboot.service
 Systemd service that runs
-.B cup-postreboot
+.B cup\-postreboot
 on first boot after update.
 .TP
 .I /etc/rauc/system.conf
@@ -271,7 +271,7 @@ Install latest from Release channel:
 .PP
 .nf
 .RS
-sudo cup install --channel "Release"
+sudo cup install \-\-channel "Release"
 .RE
 .fi
 .SS "Install Specific Bundle"
@@ -279,7 +279,7 @@ Install a known bundle without prompts:
 .PP
 .nf
 .RS
-sudo cup install --bundle calculinux-bundle-20241120.raucb --yes
+sudo cup install \-\-bundle calculinux\-bundle\-20241120.raucb \-\-yes
 .RE
 .fi
 .SS "List Available Updates"
@@ -295,7 +295,7 @@ Show bundles from specific channel:
 .PP
 .nf
 .RS
-cup list --channel "Continuous"
+cup list \-\-channel "Continuous"
 .RE
 .fi
 .SS "Download Without Installing"
@@ -303,7 +303,7 @@ Download a bundle for offline installation:
 .PP
 .nf
 .RS
-cup download --bundle calculinux-bundle-20241120.raucb
+cup download \-\-bundle calculinux\-bundle\-20241120.raucb
 .RE
 .fi
 .PP
@@ -311,7 +311,7 @@ Later install from cache:
 .PP
 .nf
 .RS
-sudo rauc install /var/cache/calculinux-update/calculinux-bundle-20241120.raucb
+sudo rauc install /var/cache/calculinux\-update/calculinux\-bundle\-20241120.raucb
 .RE
 .fi
 .SS "Development Machine Update"
@@ -319,7 +319,7 @@ Skip prefetch on machines without OPKG configured:
 .PP
 .nf
 .RS
-sudo cup install --no-prefetch
+sudo cup install \-\-no\-prefetch
 .RE
 .fi
 .PP
@@ -330,7 +330,7 @@ After update and reboot, check reconciliation logs:
 .PP
 .nf
 .RS
-journalctl -u calculinux-update-postreboot.service
+journalctl \-u calculinux\-update\-postreboot.service
 .RE
 .fi
 .PP
@@ -338,12 +338,12 @@ Look for messages like:
 .PP
 .nf
 .RS
-cup-hook: pruned writable status against new image
-cup-hook: queued 3 packages for reinstall
-cup-hook: queued 5 packages for upgrade
-cup-postreboot: reinstalling 3 packages
-cup-postreboot: upgrading 5 packages
-cup-postreboot: reconciliation complete
+cup\-hook: pruned writable status against new image
+cup\-hook: queued 3 packages for reinstall
+cup\-hook: queued 5 packages for upgrade
+cup\-postreboot: reinstalling 3 packages
+cup\-postreboot: upgrading 5 packages
+cup\-postreboot: reconciliation complete
 .RE
 .fi
 .SS "Manual Hook Invocation"
@@ -351,15 +351,15 @@ Manually run hook on a slot (for debugging):
 .PP
 .nf
 .RS
-sudo cup-hook /dev/mmcblk0p2 rootfs
+sudo cup\-hook /dev/mmcblk0p2 rootfs
 .RE
 .fi
-.SS "Manual Post-Reboot Reconciliation"
-If post-reboot service failed, retry manually:
+.SS "Manual Post\-Reboot Reconciliation"
+If post\-reboot service failed, retry manually:
 .PP
 .nf
 .RS
-sudo cup-postreboot
+sudo cup\-postreboot
 .RE
 .fi
 .PP
@@ -367,7 +367,7 @@ Or via systemd:
 .PP
 .nf
 .RS
-sudo systemctl restart calculinux-update-postreboot.service
+sudo systemctl restart calculinux\-update\-postreboot.service
 .RE
 .fi
 .SH DIAGNOSTICS
@@ -390,17 +390,17 @@ Check RAUC status:
 .nf
 .RS
 rauc status
-journalctl -u rauc -e
+journalctl \-u rauc \-e
 .RE
 .fi
 .TP
 .B "Packages not reconciling after reboot"
-Check post-reboot service:
+Check post\-reboot service:
 .PP
 .nf
 .RS
-systemctl status calculinux-update-postreboot.service
-journalctl -u calculinux-update-postreboot.service -e
+systemctl status calculinux\-update\-postreboot.service
+journalctl \-u calculinux\-update\-postreboot.service \-e
 .RE
 .fi
 .PP
@@ -408,8 +408,8 @@ Pending operations are stored in:
 .PP
 .nf
 .RS
-/var/lib/opkg/opkg-status-hook.pending-reinstalls
-/var/lib/opkg/opkg-status-hook.pending-upgrades
+/var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
+/var/lib/opkg/opkg\-status\-hook.pending\-upgrades
 .RE
 .fi
 .TP
@@ -418,7 +418,7 @@ OPKG may not be configured, or bundle extras may be missing. Check for bundle ex
 .PP
 .nf
 .RS
-unsquashfs -ll bundle.raucb | grep bundle-extras.tar.gz
+unsquashfs \-ll bundle.raucb | grep bundle\-extras.tar.gz
 .RE
 .fi
 .PP
@@ -427,19 +427,19 @@ If bundle extras are missing, use
 .PP
 .nf
 .RS
-sudo cup install --no-prefetch
+sudo cup install \-\-no\-prefetch
 .RE
 .fi
 .PP
 Ensure network access is available after reboot.
 .TP
 .B "Bundle extras corrupted"
-If bundle extras extraction fails, the bundle may be corrupted. Re-download:
+If bundle extras extraction fails, the bundle may be corrupted. Re\-download:
 .PP
 .nf
 .RS
-sudo cup download --bundle <bundle-name>
-sudo cup install --bundle <bundle-name>
+sudo cup download \-\-bundle <bundle\-name>
+sudo cup install \-\-bundle <bundle\-name>
 .RE
 .fi
 .TP
@@ -448,7 +448,7 @@ If prefetch succeeded, reconciliation should work offline using cached packages.
 .PP
 .nf
 .RS
-sudo systemctl restart calculinux-update-postreboot.service
+sudo systemctl restart calculinux\-update\-postreboot.service
 .RE
 .fi
 .SH ROLLBACK

@@ -4,7 +4,7 @@ This module addresses a specific edge case in Calculinux's dual-layer package
 management system:
 
 SCENARIO:
-1. User installs a package he needs (i.e (e.g., SDL) into the OverlayFS layer that is not present
+1. User installs a package he needs (e.g., SDL) into the OverlayFS layer because it is not present
    in the base image
 2. New RAUC update includes a version of that package in the base image
 3. During reconciliation, the old overlay package is removed with `opkg remove`
@@ -17,10 +17,9 @@ After removing duplicate packages, this module:
 1. Gets the file list for removed packages using `opkg files <package>`
 2. Checks each file path for whiteout files (character device with major:minor 0:0)
 3. Removes the whiteouts to expose the base image files
-4. Remounts the overlay to immediately pick up the changes
 
-The remount happens automatically after whiteout cleanup and ensures that base
-image files are immediately accessible without waiting for a reboot.
+NOTE: OverlayFS may need to be remounted to fully pick up changes. This typically
+happens automatically during the reboot following the update.
 """
 
 from __future__ import annotations
