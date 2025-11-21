@@ -19,6 +19,7 @@ from .opkg.reconcile import (
     snapshot_current_slot_status,
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
+from .opkg.overlayfs import cleanup_whiteouts_for_packages
 
 LOG = logging.getLogger("calculinux_update.hooks")
 LOG.setLevel(logging.INFO)
@@ -496,6 +497,8 @@ def _prune_writable_status(image_status: Path) -> None:
 
 
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
+    removed_packages = []
+    
     for pkg in duplicates:
         LOG.info("removing duplicate package %s", pkg)
         result = subprocess.run(
@@ -506,6 +509,19 @@ def _remove_duplicates(duplicates: Iterable[str]) -> None:
         )
         if result.returncode != 0:
             LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
+        else:
+            removed_packages.append(pkg)
+    
+    # Clean up OverlayFS whiteouts for successfully removed packages
+    # This ensures files from the base image become visible again
+    if removed_packages:
+        LOG.info("cleaning up OverlayFS whiteouts for %d removed packages", len(removed_packages))
+        try:
+            whiteouts_removed = cleanup_whiteouts_for_packages(removed_packages)
+            if whiteouts_removed > 0:
+                LOG.info("removed %d whiteout file(s), overlay remounted to expose base image files", whiteouts_removed)
+        except Exception as e:
+            LOG.warning("error during whiteout cleanup: %s", e)
 
 
 def _write_pending(path: Path, packages: List[str], label: str) -> None:

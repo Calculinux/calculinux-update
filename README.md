@@ -157,15 +157,48 @@ The `calculinux-update` tool solves this with automatic package reconciliation t
 
 **During RAUC Install** (via `cup-hook` in `slot-post-install` phase):
 1. **Prune duplicates**: Removes any packages from the overlay that are now provided by the new image
-2. **Snapshot current state**: Records which packages exist in the currently-booted slot
-3. **Plan reconciliation**: Computes which packages need to be reinstalled or upgraded after reboot
-4. **Prefetch packages** (optional): Downloads packages that will be needed post-reboot so the system can work offline
+2. **Clean up OverlayFS whiteouts**: Removes whiteout files that would block access to base image files (see below)
+3. **Snapshot current state**: Records which packages exist in the currently-booted slot
+4. **Plan reconciliation**: Computes which packages need to be reinstalled or upgraded after reboot
+5. **Prefetch packages** (optional): Downloads packages that will be needed post-reboot so the system can work offline
 
 **After Reboot** (via `cup-postreboot` systemd service):
 1. Runs `opkg update` to refresh package feeds
 2. **Reinstalls** packages that were present in the old image but missing from the new one
 3. **Upgrades** all overlay packages to match versions in the new base image
 4. Cleans up pending operation lists on success
+
+### OverlayFS Whiteout Cleanup
+
+Calculinux uses OverlayFS to provide a writable layer on top of the read-only base image. A specific edge case can occur during updates:
+
+**The Problem:**
+1. User installs a package (e.g., SDL) from the overlay that shadows files in the base image
+2. A new RAUC update integrates a newer version of that same package (SDL) into the base image
+3. During reconciliation, the duplicate package is removed from the overlay using `opkg remove`
+4. OverlayFS creates "whiteout" files (character devices with major:minor 0:0) for each removed file that has a corresponding file in the lower layer
+5. These whiteouts persist after package removal, blocking access to the newer version in the base image
+
+**The Solution:**
+The reconciliation system automatically detects and removes these whiteout files when removing duplicate packages. This happens during the `slot-post-install` phase:
+
+1. Track which packages were successfully removed
+2. Query opkg for the file list of each removed package
+3. Check each file path for whiteout files (character device 0:0)
+4. Remove whiteout files to expose the base image files
+5. Remount the overlay to pick up the changes immediately
+6. Continue with the rest of the reconciliation process
+
+**Important Note:**
+The overlay is automatically remounted after whiteout cleanup to ensure changes are immediately visible. The system will also naturally remount during the reboot following the update.
+
+**Technical Details:**
+- Whiteout files are character devices with device number 0:0
+- They are **only** created when a file in the upper layer is deleted **and** a file with the same name exists in the lower layer
+- The cleanup process uses `opkg files <package>` to get the file list for removed packages
+- Only whiteout files corresponding to removed packages are deleted, preserving other legitimate character devices
+- Errors during whiteout cleanup are logged but don't prevent the update from proceeding
+- This cleanup is essential for scenarios where user overlay packages are superseded by newer base image versions
 
 ### Configuration
 
