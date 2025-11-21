@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import List, Optional
 
@@ -406,6 +407,30 @@ def install(
         sudo=sudo,
         dry_run=dry_run,
     )
+    
+    # Prompt to reboot after successful installation
+    if not dry_run:
+        console.print("\n[green]✓[/] RAUC installation completed successfully")
+        console.print("[cyan]A reboot is required to boot into the new system[/]")
+        
+        if assume_yes:
+            # In non-interactive mode, inform but don't reboot automatically
+            console.print("[yellow]Please reboot the system when ready[/]")
+        else:
+            # Interactive prompt to reboot now
+            should_reboot = typer.confirm(
+                "Reboot now?",
+                default=False,
+            )
+            if should_reboot:
+                console.print("[cyan]Rebooting system...[/]")
+                try:
+                    subprocess.run(["systemctl", "reboot"], check=True)
+                except Exception as exc:
+                    console.print(f"[red]Failed to reboot:[/] {exc}")
+                    console.print("[yellow]Please reboot manually with 'systemctl reboot' or 'reboot'[/]")
+            else:
+                console.print("[yellow]Remember to reboot when ready to activate the new system[/]")
 
 
 if __name__ == "__main__":
