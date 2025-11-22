@@ -7,7 +7,7 @@ cup, cup-hook, cup-postreboot \- Calculinux system update tools
 .RI [ options ]
 .br
 .B cup-hook
-.I slot_device slot_type
+.I hook_type slot_name
 .br
 .B cup-postreboot
 .SH DESCRIPTION
@@ -17,10 +17,10 @@ The Calculinux update system provides A/B slot\-based system updates with automa
 Main command\-line interface for browsing, downloading, and installing RAUC update bundles with integrated package prefetching.
 .TP
 .B cup\-hook
-RAUC hook invoked during slot\-post\-install phase to reconcile package status files and queue post\-reboot operations.
+RAUC post\-install handler invoked during bundle installation to perform complete package reconciliation planning. Removes duplicate packages, prunes writable status, and queues pending operations before reboot.
 .TP
 .B cup\-postreboot
-Post\-reboot service that completes package reconciliation after switching to new slot.
+Post\-reboot service that executes pending package operations (reinstalls and upgrades) queued by cup\-hook.
 .SS "Bundle Extras"
 Calculinux RAUC bundles include additional metadata beyond the root filesystem image. The
 .B bundle\-extras.tar.gz
@@ -33,7 +33,15 @@ extras/opkg/status.image # Package status from new image
 .RE
 .fi
 .PP
-This metadata enables the prefetch system to download packages before installation, allowing offline reconciliation after reboot. If bundle extras are missing, prefetch is skipped and network access is required after reboot.
+This metadata serves two purposes:
+.IP 1. 3
+Enables the prefetch system to download packages before installation
+.IP 2.
+Provides status.image to cup\-hook without requiring slot mounting
+.PP
+Bundle extras are extracted by the RAUC post\-install handler and passed to cup\-hook via the
+.B RAUC_BUNDLE_STATUS_IMAGE
+environment variable. This allows cup\-hook to perform complete reconciliation without mounting the newly installed slot, improving reliability and performance.
 .SH COMMANDS
 .SS "cup list"
 List available update bundles from configured channels.
@@ -81,7 +89,7 @@ Interactively select and install an update bundle. The installation process:
 .PP
 After reboot, the
 .B cup\-postreboot
-service automatically reconciles packages using prefetched .ipk files when available, falling back to network download if needed.
+service automatically executes pending package operations using prefetched .ipk files when available, falling back to network download if needed.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-channel " " \fICHANNEL\fR
@@ -173,33 +181,63 @@ When updating the base image, three problems arise:
 .TP
 2.
 .B Missing packages
-\- Packages removed from new base that overlay packages depend on.
+\- Packages removed from new base that user packages depend on.
 .TP
 3.
 .B Version conflicts
 \- Overlay packages compiled against old base versions.
 .SS "Reconciliation Phases"
-The update system solves these problems in three phases:
+The update system solves these problems in two phases:
 .TP
-.B Phase 1: Prefetch (before reboot)
+.B Phase 1: Prefetch (optional, before installation)
 .B cup install
-downloads packages that will need reinstalling or upgrading after reboot. Packages are cached in
-.IR /var/cache/calculinux\-update/opkg\-cache/ .
-This enables offline reconciliation.
+extracts bundle extras and downloads packages that will need reinstalling or upgrading after reboot. Packages are cached in
+.IR /var/cache/calculinux\-update/prefetch/ .
+This enables offline reconciliation. If prefetch is skipped or fails, network access is required after reboot.
 .TP
-.B Phase 2: Hook (during RAUC install)
+.B Phase 2: Hook (during RAUC installation)
 .B cup\-hook
-is invoked by RAUC during slot\-post\-install. It mounts the new slot, compares package status files, removes duplicate packages from overlay, and queues pending operations:
+is invoked by RAUC's post\-install handler after the bundle is installed. The hook receives the
+.I status.image
+file from bundle extras (via
+.B RAUC_BUNDLE_STATUS_IMAGE
+environment variable) and performs complete reconciliation planning:
 .RS
-.IP \(bu 2
-.I /var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
-.IP \(bu
-.I /var/lib/opkg/opkg\-status\-hook.pending\-upgrades
+.IP 1. 3
+Removes duplicate packages from writable overlay (packages now in base)
+.IP 2.
+Prunes writable status file to remove entries for base packages
+.IP 3.
+Identifies packages to reinstall (removed from new base)
+.IP 4.
+Identifies packages to upgrade (writable packages needing version updates)
+.IP 5.
+Writes pending operation files for post\-reboot execution
+.IP 6.
+Sets status\-pruned marker to indicate completion
 .RE
+.IP
+All planning and duplicate removal happens
+.B before reboot
+while still in the pre\-update environment. The hook ensures the writable status is clean and ready for the new base image.
 .TP
 .B Phase 3: Post\-reboot (after slot switch)
 .B cup\-postreboot
-runs on first boot into new slot (via systemd service). It updates package feeds, reinstalls missing packages (using cached .ipk files if available), upgrades all overlay packages to match new base versions, and cleans up pending files.
+runs on first boot into new slot (triggered by systemd condition on pending files). It simply executes the plan created by the hook:
+.RS
+.IP 1. 3
+Updates package feeds (opkg update)
+.IP 2.
+Reinstalls missing packages (using cached .ipk files if available)
+.IP 3.
+Upgrades overlay packages to match new base versions
+.IP 4.
+Cleans up pending files and markers
+.RE
+.IP
+The post\-reboot service contains
+.B no reconciliation logic
+\- it purely executes operations queued by the hook. This separation ensures the complex planning happens before reboot when both old and new status files are accessible.
 .SH FILES
 .TP
 .I /etc/calculinux\-update.toml
@@ -208,28 +246,38 @@ Main configuration file defining channels and mirror settings.
 .I /var/cache/calculinux\-update/
 Cache directory for downloaded bundles and prefetched packages.
 .TP
-.I /var/cache/calculinux\-update/opkg\-cache/
+.I /var/cache/calculinux\-update/prefetch/
 Prefetched .ipk package files for offline reconciliation.
 .TP
 .I /var/lib/opkg/status
 Current installed package status (writable overlay).
 .TP
 .I /var/lib/opkg/status.image
-Base image package status (read\-only).
+Base image package status (read\-only, provided by base image).
 .TP
-.I /var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
-Packages queued for reinstall after reboot.
+.I /var/lib/calculinux\-update/update\-state.pending\-reinstalls
+Packages queued for reinstall after reboot (created by cup\-hook).
 .TP
-.I /var/lib/opkg/opkg\-status\-hook.pending\-upgrades
-Packages queued for upgrade after reboot.
+.I /var/lib/calculinux\-update/update\-state.pending\-upgrades
+Packages queued for upgrade after reboot (created by cup\-hook).
 .TP
-.I /lib/systemd/system/calculinux\-update\-postreboot.service
+.I /var/lib/calculinux\-update/status\-pruned
+Marker file indicating cup\-hook completed status pruning.
+.TP
+.I /usr/lib/systemd/system/cup\-postreboot.service
 Systemd service that runs
 .B cup\-postreboot
-on first boot after update.
+on first boot after update (triggered by pending files or absence of status\-pruned marker).
 .TP
-.I /etc/rauc/system.conf
-RAUC configuration with hook integration.
+.I /usr/lib/rauc/post\-install\-handler.sh
+RAUC post\-install handler that calls
+.BR cup\-hook .
+.TP
+.I /usr/lib/calculinux\-update/cup\-hook
+RAUC hook binary for reconciliation planning (invoked by post\-install handler).
+.TP
+.I /usr/lib/calculinux\-update/cup\-postreboot
+Post\-reboot reconciliation binary (invoked by systemd service).
 .SH ENVIRONMENT
 .TP
 .B LOGLEVEL
@@ -246,15 +294,10 @@ LOGLEVEL=DEBUG cup install
 .RE
 .fi
 .TP
-.B RAUC_SLOT_DEVICE
-(Hook only) Block device of newly installed slot (e.g.,
-.IR /dev/mmcblk0p2
-). Automatically set by RAUC.
-.TP
-.B RAUC_SLOT_TYPE
-(Hook only) Slot type (e.g.,
-.IR rootfs
-). Automatically set by RAUC.
+.B RAUC_BUNDLE_STATUS_IMAGE
+(Hook only) Path to status.image file from bundle extras (e.g.,
+.IR /tmp/rauc-bundle/extras/opkg/status.image
+). Provided by RAUC post\-install handler, allows hook to access new image's package status without mounting the slot.
 .SH EXAMPLES
 .SS "Interactive Update"
 Install the latest update interactively:
@@ -339,19 +382,23 @@ Look for messages like:
 .nf
 .RS
 cup\-hook: pruned writable status against new image
+cup\-hook: removed 2 duplicate packages
 cup\-hook: queued 3 packages for reinstall
 cup\-hook: queued 5 packages for upgrade
-cup\-postreboot: reinstalling 3 packages
+cup\-hook: marked status as pruned for new image
+cup\-postreboot: reinstalling 3 packages from cache
 cup\-postreboot: upgrading 5 packages
 cup\-postreboot: reconciliation complete
 .RE
 .fi
 .SS "Manual Hook Invocation"
-Manually run hook on a slot (for debugging):
+Manually run hook (for debugging, requires bundle extras):
 .PP
 .nf
 .RS
-sudo cup\-hook /dev/mmcblk0p2 rootfs
+export RAUC_BUNDLE_STATUS_IMAGE=/path/to/status.image
+export RAUC_SLOT_CLASS=rootfs
+sudo cup\-hook slot\-post\-install rootfs.1
 .RE
 .fi
 .SS "Manual Post\-Reboot Reconciliation"
@@ -399,8 +446,8 @@ Check post\-reboot service:
 .PP
 .nf
 .RS
-systemctl status calculinux\-update\-postreboot.service
-journalctl \-u calculinux\-update\-postreboot.service \-e
+systemctl status cup\-postreboot.service
+journalctl \-u cup\-postreboot.service \-e
 .RE
 .fi
 .PP
@@ -408,8 +455,8 @@ Pending operations are stored in:
 .PP
 .nf
 .RS
-/var/lib/opkg/opkg\-status\-hook.pending\-reinstalls
-/var/lib/opkg/opkg\-status\-hook.pending\-upgrades
+/var/lib/calculinux\-update/update\-state.pending\-reinstalls
+/var/lib/calculinux\-update/update\-state.pending\-upgrades
 .RE
 .fi
 .TP
@@ -444,11 +491,13 @@ sudo cup install \-\-bundle <bundle\-name>
 .fi
 .TP
 .B "Network unavailable after reboot"
-If prefetch succeeded, reconciliation should work offline using cached packages. If not, restore network access and restart the service:
+If prefetch succeeded, reconciliation should work offline using cached packages in
+.IR /var/cache/calculinux\-update/prefetch/ .
+If packages are missing from cache, restore network access and restart the service:
 .PP
 .nf
 .RS
-sudo systemctl restart calculinux\-update\-postreboot.service
+sudo systemctl restart cup\-postreboot.service
 .RE
 .fi
 .SH ROLLBACK
