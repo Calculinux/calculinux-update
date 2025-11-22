@@ -13,13 +13,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from .opkg.overlayfs import cleanup_whiteouts_for_packages
 from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
-    snapshot_current_slot_status,
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
-from .opkg.overlayfs import cleanup_whiteouts_for_packages
 
 LOG = logging.getLogger("calculinux_update.hooks")
 LOG.setLevel(logging.INFO)
@@ -198,6 +197,11 @@ def _save_pre_update_state(updated_slot: str) -> None:
     """Save current state before update for rollback detection."""
     _ensure_state_dir()
 
+    # Clear status-pruned marker to ensure post-reboot service runs
+    # Even if there are no pending operations, we need to prune writable status
+    STATUS_PRUNED_MARKER.unlink(missing_ok=True)
+    LOG.debug("cleared status-pruned marker for new update")
+
     # Critical: Record which slot we're updating to
     try:
         _atomic_write(UPDATED_SLOT_NAME, updated_slot + "\n")
@@ -367,14 +371,15 @@ def run_slot_hook(hook: str, slot: str) -> None:
     if os.environ.get("RAUC_SLOT_CLASS") != "rootfs":
         return
 
-    mount_point = os.environ.get("RAUC_SLOT_MOUNT_POINT")
-    if not mount_point:
-        LOG.warning("RAUC_SLOT_MOUNT_POINT not provided for slot %s", slot)
+    # Get the status.image from bundle extras (provided by post-install-handler.sh)
+    bundle_status_image = os.environ.get("RAUC_BUNDLE_STATUS_IMAGE")
+    if not bundle_status_image:
+        LOG.warning("RAUC_BUNDLE_STATUS_IMAGE not provided for slot %s", slot)
         return
 
-    image_status = Path(mount_point) / "var/lib/opkg/status.image"
+    image_status = Path(bundle_status_image)
     if not image_status.exists():
-        LOG.warning("image status %s missing", image_status)
+        LOG.warning("bundle status image %s missing", image_status)
         return
 
     if not WRITABLE_STATUS.exists():
@@ -384,27 +389,33 @@ def run_slot_hook(hook: str, slot: str) -> None:
     # Save pre-update state for rollback detection
     _save_pre_update_state(slot)
 
-    current_status = (
-        CURRENT_IMAGE_STATUS
-        if CURRENT_IMAGE_STATUS.exists()
-        else snapshot_current_slot_status()
-    )
-    cleanup_snapshot = isinstance(current_status, Path) and current_status != CURRENT_IMAGE_STATUS
+    # The current slot must have a status.image file
+    # All Calculinux images include this file
+    if not CURRENT_IMAGE_STATUS.exists():
+        LOG.error("current image status %s missing - image too old?", CURRENT_IMAGE_STATUS)
+        raise SystemExit(1)
 
     try:
         _prune_writable_status(image_status)
         plan = compute_reconcile_plan(
             image_status=image_status,
             writable_status=WRITABLE_STATUS,
-            current_status=current_status,
+            current_status=CURRENT_IMAGE_STATUS,
         )
     finally:
-        if cleanup_snapshot and isinstance(current_status, Path):
-            current_status.unlink(missing_ok=True)
+        pass
 
     _remove_duplicates(plan.duplicates)
     _write_pending(PENDING_REINSTALL_FILE, plan.reinstall, "reinstall")
     _write_pending(PENDING_UPGRADE_FILE, plan.upgrade, "upgrade")
+
+    # Mark status as pruned - the hook has done all the preparation work
+    # If there are no pending operations, the post-reboot service won't need to run
+    try:
+        _atomic_write(STATUS_PRUNED_MARKER, "pruned\n")
+        LOG.info("marked status as pruned for new image")
+    except (OSError, IOError) as e:
+        LOG.warning("failed to mark status as pruned: %s", e)
 
 
 def postreboot_entrypoint() -> None:
@@ -431,36 +442,11 @@ def postreboot_entrypoint() -> None:
 
         # Not a rollback - proceed with forward update processing
         has_pending = PENDING_REINSTALL_FILE.exists() or PENDING_UPGRADE_FILE.exists()
-        
-        # Check if we need to prune writable status
-        # We only do this once per image to avoid running on every boot
-        needs_pruning = (
-            CURRENT_IMAGE_STATUS.exists() and 
-            WRITABLE_STATUS.exists() and 
-            not STATUS_PRUNED_MARKER.exists()
-        )
-        
-        if needs_pruning:
-            try:
-                image_packages = load_package_names(CURRENT_IMAGE_STATUS)
-                changed = prune_writable_status(WRITABLE_STATUS, image_packages)
-                if changed:
-                    LOG.info("pruned writable status against base image")
-                else:
-                    LOG.info("writable status already clean")
-                
-                # Mark as pruned so we don't run again
-                _atomic_write(STATUS_PRUNED_MARKER, "pruned\n")
-                LOG.info("marked status as pruned for this image")
-            except (OSError, IOError) as e:
-                LOG.warning("failed to prune writable status: %s", e)
-        
+
         # If no pending operations, we're done
+        # The hook has already pruned the writable status
         if not has_pending:
-            if needs_pruning:
-                LOG.info("status cleanup complete, no pending operations")
-            else:
-                LOG.info("no pending operations and status already pruned")
+            LOG.info("no pending operations")
             return
 
         if not _run_opkg(["update"]):
@@ -498,7 +484,7 @@ def _prune_writable_status(image_status: Path) -> None:
 
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
     removed_packages = []
-    
+
     for pkg in duplicates:
         LOG.info("removing duplicate package %s", pkg)
         result = subprocess.run(
@@ -511,7 +497,7 @@ def _remove_duplicates(duplicates: Iterable[str]) -> None:
             LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
         else:
             removed_packages.append(pkg)
-    
+
     # Clean up OverlayFS whiteouts for successfully removed packages
     # This ensures files from the base image become visible again
     if removed_packages:
@@ -519,7 +505,10 @@ def _remove_duplicates(duplicates: Iterable[str]) -> None:
         try:
             whiteouts_removed = cleanup_whiteouts_for_packages(removed_packages)
             if whiteouts_removed > 0:
-                LOG.info("removed %d whiteout file(s), overlay remounted to expose base image files", whiteouts_removed)
+                LOG.info(
+                    "removed %d whiteout file(s), overlay remounted to expose base image files",
+                    whiteouts_removed,
+                )
         except Exception as e:
             LOG.warning("error during whiteout cleanup: %s", e)
 

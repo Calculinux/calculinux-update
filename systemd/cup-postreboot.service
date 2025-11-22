@@ -10,7 +10,7 @@ ConditionPathExists=|!/var/lib/calculinux-update/status-pruned
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/cup-postreboot
+ExecStart=/usr/lib/calculinux-update/cup-postreboot
 
 [Install]
 WantedBy=multi-user.target

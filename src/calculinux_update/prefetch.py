@@ -14,7 +14,7 @@ from typing import List, Optional, Sequence
 from rich.console import Console
 
 from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
-from .opkg.reconcile import ReconcilePlan, compute_reconcile_plan, snapshot_current_slot_status
+from .opkg.reconcile import ReconcilePlan, compute_reconcile_plan
 
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
 PREFETCH_STATE_FILE = Path("/var/lib/calculinux-update/prefetch.json")
@@ -58,22 +58,18 @@ def _prefetch_with_extras(
     if not WRITABLE_STATUS.exists():
         return PrefetchResult(skipped=True, reason=f"{WRITABLE_STATUS} missing")
 
-    current_status = (
-        CURRENT_IMAGE_STATUS
-        if CURRENT_IMAGE_STATUS.exists()
-        else snapshot_current_slot_status()
-    )
-    cleanup_snapshot = isinstance(current_status, Path) and current_status != CURRENT_IMAGE_STATUS
-
-    try:
-        plan = compute_reconcile_plan(
-            image_status=extras.image_status,
-            writable_status=WRITABLE_STATUS,
-            current_status=current_status,
+    # Require status.image from current slot - all Calculinux images have this
+    if not CURRENT_IMAGE_STATUS.exists():
+        return PrefetchResult(
+            skipped=True,
+            reason=f"{CURRENT_IMAGE_STATUS} missing - image may be too old"
         )
-    finally:
-        if cleanup_snapshot and isinstance(current_status, Path):
-            current_status.unlink(missing_ok=True)
+
+    plan = compute_reconcile_plan(
+        image_status=extras.image_status,
+        writable_status=WRITABLE_STATUS,
+        current_status=CURRENT_IMAGE_STATUS,
+    )
 
     if not plan.reinstall:
         return PrefetchResult(skipped=True, reason="no reinstall packages")

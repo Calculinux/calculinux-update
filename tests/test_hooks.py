@@ -65,13 +65,15 @@ def test_run_slot_hook(monkeypatch, tmp_path):
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-update-writable")
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "pending-reinstalls")
     monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "pending-upgrades")
+    monkeypatch.setattr(hooks, "STATUS_PRUNED_MARKER", state_dir / "status-pruned")
 
     mount = tmp_path / "slot"
     (mount / "var/lib/opkg").mkdir(parents=True)
-    (mount / "var/lib/opkg/status.image").write_text("Package: base\n\n")
+    bundle_status_image = mount / "var/lib/opkg/status.image"
+    bundle_status_image.write_text("Package: base\n\n")
 
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
-    monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(mount))
+    monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status_image))
 
     pruned = {}
     monkeypatch.setattr(
@@ -119,57 +121,20 @@ def test_run_slot_hook_missing_mount_point(monkeypatch, caplog):
 def test_run_slot_hook_missing_image_status(monkeypatch, tmp_path, caplog):
     caplog.set_level("WARNING", logger="calculinux_update.hooks")
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
-    monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(tmp_path / "noslot"))
+    # Don't set RAUC_BUNDLE_STATUS_IMAGE - this simulates bundle without extras
     hooks.run_slot_hook("slot-post-install", "slot")
-    assert "missing" in caplog.text
+    assert "not provided" in caplog.text
 
 
 def test_run_slot_hook_missing_writable_status(monkeypatch, tmp_path, caplog):
     caplog.set_level("WARNING", logger="calculinux_update.hooks")
-    mount = tmp_path / "slot"
-    (mount / "var/lib/opkg").mkdir(parents=True)
-    (mount / "var/lib/opkg/status.image").write_text("Package: base\n\n")
+    bundle_status = tmp_path / "status.image"
+    bundle_status.write_text("Package: base\n\n")
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
-    monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(mount))
+    monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status))
     monkeypatch.setattr(hooks, "WRITABLE_STATUS", tmp_path / "missing-status")
     hooks.run_slot_hook("slot-post-install", "slot")
     assert "writable status" in caplog.text
-
-
-def test_run_slot_hook_cleans_temp_snapshot(monkeypatch, tmp_path):
-    writable = tmp_path / "status"
-    writable.write_text("Package: overlay\n\n")
-    monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable)
-
-    # Mock state directory and files for rollback tracking
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
-    monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", state_dir / "updated-slot")
-    monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", state_dir / "pre-update-slot")
-    monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-update-writable")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "pending-reinstalls")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "pending-upgrades")
-
-    mount = tmp_path / "slot"
-    (mount / "var/lib/opkg").mkdir(parents=True)
-    (mount / "var/lib/opkg/status.image").write_text("Package: base\n\n")
-
-    snapshot = tmp_path / "snapshot"
-    snapshot.write_text("snapshot")
-    monkeypatch.setattr(hooks, "CURRENT_IMAGE_STATUS", tmp_path / "current-default")
-    monkeypatch.setattr(hooks, "snapshot_current_slot_status", lambda: snapshot)
-
-    monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
-    monkeypatch.setenv("RAUC_SLOT_MOUNT_POINT", str(mount))
-
-    plan = ReconcilePlan(duplicates=[], reinstall=["foo"], upgrade=[])
-    monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
-    monkeypatch.setattr(hooks, "_remove_duplicates", lambda *_: None)
-    monkeypatch.setattr(hooks, "_write_pending", lambda *args, **kwargs: None)
-
-    hooks.run_slot_hook("slot-post-install", "slot")
-    assert not snapshot.exists()
 
 
 def test_postreboot_entrypoint(monkeypatch, tmp_path):
@@ -303,6 +268,8 @@ def test_remove_duplicates_handles_failures(monkeypatch):
         return SimpleNamespace(returncode=1, stderr="boom", stdout="")
 
     monkeypatch.setattr(hooks.subprocess, "run", fake_run)
+    # Mock cleanup_whiteouts_for_packages to avoid additional subprocess calls
+    monkeypatch.setattr(hooks, "cleanup_whiteouts_for_packages", lambda packages: len(packages))
     hooks._remove_duplicates(["good", "bad"])
     assert calls == ["good", "bad"]
 

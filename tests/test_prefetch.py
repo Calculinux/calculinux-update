@@ -51,7 +51,11 @@ def test_prefetch_for_bundle(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(prefetch, "extract_bundle_extras", lambda *_: extras_obj)
-    monkeypatch.setattr(prefetch, "snapshot_current_slot_status", lambda: None)
+
+    # Mock CURRENT_IMAGE_STATUS to provide current slot status
+    current_status = tmp_path / "current.status"
+    current_status.write_text("Package: keep\nPackage: foo\n\n")
+    monkeypatch.setattr(prefetch, "CURRENT_IMAGE_STATUS", current_status)
 
     class FakeDownloader:
         def __init__(self, *_):

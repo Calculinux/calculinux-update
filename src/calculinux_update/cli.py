@@ -407,12 +407,12 @@ def install(
         sudo=sudo,
         dry_run=dry_run,
     )
-    
+
     # Prompt to reboot after successful installation
     if not dry_run:
         console.print("\n[green]✓[/] RAUC installation completed successfully")
         console.print("[cyan]A reboot is required to boot into the new system[/]")
-        
+
         if assume_yes:
             # In non-interactive mode, inform but don't reboot automatically
             console.print("[yellow]Please reboot the system when ready[/]")
@@ -428,7 +428,9 @@ def install(
                     subprocess.run(["systemctl", "reboot"], check=True)
                 except Exception as exc:
                     console.print(f"[red]Failed to reboot:[/] {exc}")
-                    console.print("[yellow]Please reboot manually with 'systemctl reboot' or 'reboot'[/]")
+                    console.print(
+                        "[yellow]Please reboot manually with 'systemctl reboot' or 'reboot'[/]"
+                    )
             else:
                 console.print("[yellow]Remember to reboot when ready to activate the new system[/]")
 
