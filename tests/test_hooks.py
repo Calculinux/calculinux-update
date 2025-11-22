@@ -80,23 +80,31 @@ def test_run_slot_hook(monkeypatch, tmp_path):
         hooks, "prune_writable_status", lambda *_: pruned.setdefault("called", True)
     )
 
-    plan = ReconcilePlan(duplicates=["base"], reinstall=["foo"], upgrade=["bar"])
+    plan = ReconcilePlan(
+        duplicates=["base"],
+        status_only_duplicates=["status-only"],
+        reinstall=["foo"],
+        upgrade=["bar"]
+    )
     monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
 
-    recorded = {"duplicates": None, "reinstall": None, "upgrade": None}
+    recorded = {"duplicates": None, "reinstall": None, "upgrade": None, "status_only": None}
 
-    def fake_remove(pkgs):
-        recorded["duplicates"] = pkgs
+    def fake_prune_status_only(pkgs):
+        recorded["status_only"] = pkgs
 
     def fake_write(path, packages, label):
         recorded[label] = list(packages)
 
-    monkeypatch.setattr(hooks, "_remove_duplicates", fake_remove)
+    monkeypatch.setattr(hooks, "_prune_status_only_duplicates", fake_prune_status_only)
     monkeypatch.setattr(hooks, "_write_pending", fake_write)
 
     hooks.run_slot_hook("slot-post-install", "rootfs.0")
 
-    assert recorded["duplicates"] == ["base"]
+    # Phase 1: status-only duplicates should be pruned
+    assert recorded["status_only"] == ["status-only"]
+    # Phase 2: physical duplicates should be queued for post-reboot
+    assert recorded["duplicate removal"] == ["base"]
     assert recorded["reinstall"] == ["foo"]
     assert recorded["upgrade"] == ["bar"]
 

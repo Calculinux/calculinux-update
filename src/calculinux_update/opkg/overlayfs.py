@@ -38,6 +38,7 @@ __all__ = [
     "cleanup_whiteouts_for_packages",
     "get_package_files",
     "find_whiteout_files",
+    "has_files_in_upper",
     "remount_overlayfs",
 ]
 
@@ -243,6 +244,47 @@ def remount_overlayfs(mount_point: str = "/") -> bool:
     except (subprocess.SubprocessError, OSError) as e:
         LOGGER.warning("Error remounting %s: %s", mount_point, e)
         return False
+
+
+def has_files_in_upper(package_name: str, upper_dir: str = "/") -> bool:
+    """
+    Check if a package has any actual files present in the upper layer.
+
+    This is used to distinguish between:
+    1. Packages that exist in status file but have no files in upper layer
+       (safe to remove from status file only)
+    2. Packages that have actual files in upper layer
+       (need physical removal with opkg remove + whiteout cleanup)
+
+    Args:
+        package_name: Name of the package to check
+        upper_dir: Root directory of the overlay upper layer (default: /)
+
+    Returns:
+        True if the package has any regular files or directories in upper layer,
+        False if only has whiteouts or no files at all
+    """
+    file_paths = get_package_files(package_name)
+
+    if not file_paths:
+        LOGGER.debug("No file list found for package %s", package_name)
+        return False
+
+    # Check if any of the package's files exist as real files (not whiteouts) in upper
+    for file_path in file_paths:
+        path = Path(upper_dir) / file_path.lstrip('/')
+
+        try:
+            # Check if path exists and is NOT a whiteout
+            if path.exists() and not is_whiteout_file(path):
+                LOGGER.debug("Package %s has real file in upper: %s", package_name, path)
+                return True
+        except (OSError, FileNotFoundError):
+            # File doesn't exist or can't be accessed - continue checking others
+            continue
+
+    LOGGER.debug("Package %s has no real files in upper layer", package_name)
+    return False
 
 
 def cleanup_whiteouts_for_packages(

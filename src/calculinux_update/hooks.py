@@ -35,6 +35,7 @@ STATE_DIR = Path("/var/lib/calculinux-update")
 LOCK_FILE = STATE_DIR / ".lock"
 
 # Update state files (new locations in /var/lib/calculinux-update/)
+PENDING_DUPLICATES_FILE = STATE_DIR / "update-state.pending-duplicates"
 PENDING_REINSTALL_FILE = STATE_DIR / "update-state.pending-reinstalls"
 PENDING_UPGRADE_FILE = STATE_DIR / "update-state.pending-upgrades"
 PRE_UPDATE_WRITABLE_STATUS = STATE_DIR / "update-state.pre-update-writable"
@@ -182,6 +183,7 @@ def _cleanup_update_state() -> None:
         PRE_UPDATE_SLOT_NAME,
         UPDATED_SLOT_NAME,
         UPDATE_BOOT_ID,
+        PENDING_DUPLICATES_FILE,
         PENDING_REINSTALL_FILE,
         PENDING_UPGRADE_FILE,
         STATUS_PRUNED_MARKER,  # Clear pruned marker on new update
@@ -405,7 +407,18 @@ def run_slot_hook(hook: str, slot: str) -> None:
     finally:
         pass
 
-    _remove_duplicates(plan.duplicates)
+    # Phase 1: Remove packages from status file that have no files in upper layer
+    # This is safe to do before reboot since there are no physical files to remove
+    if plan.status_only_duplicates:
+        LOG.info(
+            "pruning %d status-only duplicate(s) (no files in upper layer)",
+            len(plan.status_only_duplicates)
+        )
+        _prune_status_only_duplicates(plan.status_only_duplicates)
+
+    # Phase 2: Physical duplicate removal will happen in post-reboot
+    # Queue packages that have actual files in upper layer for removal after reboot
+    _write_pending(PENDING_DUPLICATES_FILE, plan.duplicates, "duplicate removal")
     _write_pending(PENDING_REINSTALL_FILE, plan.reinstall, "reinstall")
     _write_pending(PENDING_UPGRADE_FILE, plan.upgrade, "upgrade")
 
@@ -441,7 +454,11 @@ def postreboot_entrypoint() -> None:
                 raise SystemExit(1)
 
         # Not a rollback - proceed with forward update processing
-        has_pending = PENDING_REINSTALL_FILE.exists() or PENDING_UPGRADE_FILE.exists()
+        has_pending = (
+            PENDING_DUPLICATES_FILE.exists() or
+            PENDING_REINSTALL_FILE.exists() or
+            PENDING_UPGRADE_FILE.exists()
+        )
 
         # If no pending operations, we're done
         # The hook has already pruned the writable status
@@ -453,10 +470,13 @@ def postreboot_entrypoint() -> None:
             LOG.error("opkg update failed; will retry next boot")
             raise SystemExit(1)
 
+        # Phase 2: Remove physical duplicates (packages with files in upper layer)
+        # This must happen after reboot when we're running from the new base image
+        duplicates_status = _process_pending(PENDING_DUPLICATES_FILE, _remove_duplicate_pkg)
         reinstall_status = _process_pending(PENDING_REINSTALL_FILE, _install_reinstall_pkg)
         upgrade_status = _process_pending(PENDING_UPGRADE_FILE, _upgrade_pkg)
 
-        if reinstall_status and upgrade_status:
+        if duplicates_status and reinstall_status and upgrade_status:
             LOG.info("post-reboot package reconciliation complete")
 
             # Save boot ID to prevent re-processing
@@ -480,6 +500,20 @@ def _prune_writable_status(image_status: Path) -> None:
     changed = prune_writable_status(WRITABLE_STATUS, load_package_names(image_status))
     if changed:
         LOG.info("pruned writable status against new image")
+
+
+def _prune_status_only_duplicates(packages: List[str]) -> None:
+    """Remove packages from writable status that have no files in upper layer.
+
+    This is Phase 1 of duplicate handling - safe to do before reboot since
+    there are no physical files to remove, only status metadata cleanup.
+    """
+    if not packages:
+        return
+
+    changed = prune_writable_status(WRITABLE_STATUS, packages)
+    if changed:
+        LOG.info("pruned %d status-only duplicate(s) from writable status", len(packages))
 
 
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
@@ -549,6 +583,36 @@ def _install_reinstall_pkg(pkg: str) -> bool:
     if not result:
         LOG.warning("failed to reinstall %s", pkg)
     return result
+
+
+def _remove_duplicate_pkg(pkg: str) -> bool:
+    """Remove a single duplicate package (Phase 2 - packages with files in upper).
+
+    This physically removes the package and cleans up any OverlayFS whiteouts.
+    """
+    LOG.info("removing duplicate package %s from upper layer", pkg)
+    result = subprocess.run(
+        ["opkg", "remove", "--nodeps", pkg],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
+        return False
+
+    # Clean up OverlayFS whiteouts for the removed package
+    try:
+        whiteouts_removed = cleanup_whiteouts_for_packages([pkg])
+        if whiteouts_removed > 0:
+            LOG.info(
+                "removed %d whiteout file(s) for %s, overlay remounted",
+                whiteouts_removed, pkg
+            )
+    except Exception as e:
+        LOG.warning("error during whiteout cleanup for %s: %s", pkg, e)
+
+    return True
 
 
 def _upgrade_pkg(pkg: str) -> bool:

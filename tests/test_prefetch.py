@@ -70,7 +70,12 @@ def test_prefetch_for_bundle(monkeypatch, tmp_path):
     monkeypatch.setattr(
         prefetch,
         "compute_reconcile_plan",
-        lambda **_: SimpleNamespace(reinstall=["foo"], duplicates=[], upgrade=[]),
+        lambda **_: SimpleNamespace(
+            reinstall=["foo"],
+            duplicates=[],
+            status_only_duplicates=[],
+            upgrade=[]
+        ),
     )
 
     result = prefetch.prefetch_for_bundle(bundle_path, "sha256", console=None)

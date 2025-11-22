@@ -58,7 +58,7 @@ def _prefetch_with_extras(
     if not WRITABLE_STATUS.exists():
         return PrefetchResult(skipped=True, reason=f"{WRITABLE_STATUS} missing")
 
-    # Require status.image from current slot - all Calculinux images have this
+    # Require status.image from current slot - all current Calculinux images have this
     if not CURRENT_IMAGE_STATUS.exists():
         return PrefetchResult(
             skipped=True,

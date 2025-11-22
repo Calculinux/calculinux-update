@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from .overlayfs import has_files_in_upper
 from .status import (
     load_package_names,
     load_status_entries,
@@ -22,11 +23,17 @@ __all__ = [
 @dataclass(slots=True)
 class ReconcilePlan:
     duplicates: List[str]
+    status_only_duplicates: List[str]
     reinstall: List[str]
     upgrade: List[str]
 
     def any_actions(self) -> bool:
-        return bool(self.duplicates or self.reinstall or self.upgrade)
+        return bool(
+            self.duplicates
+            or self.status_only_duplicates
+            or self.reinstall
+            or self.upgrade
+        )
 
 
 def compute_reconcile_plan(
@@ -34,13 +41,42 @@ def compute_reconcile_plan(
     writable_status: Path,
     *,
     current_status: Optional[Path] = None,
+    upper_dir: str = "/",
 ) -> ReconcilePlan:
-    """Compute package operations required after installing a new slot."""
+    """Compute package operations required after installing a new slot.
+
+    Splits duplicate packages into two categories:
+    - status_only_duplicates: Packages in both writable status and new base image,
+      but with NO files actually present in the upper layer. These can be safely
+      removed from the status file without any physical file operations.
+    - duplicates: Packages in both writable status and new base image that DO have
+      files in the upper layer. These need physical removal with opkg + whiteout cleanup.
+
+    Args:
+        image_status: Path to the new base image's status file
+        writable_status: Path to the writable overlay's status file
+        current_status: Optional path to current running system's status file
+        upper_dir: Root directory of the overlay upper layer (default: /)
+
+    Returns:
+        ReconcilePlan with categorized package lists
+    """
 
     image_packages = load_package_names(image_status)
     writable_packages = load_package_names(writable_status)
 
-    duplicates = sorted(writable_packages & image_packages)
+    # Find all packages that exist in both places
+    all_duplicates = sorted(writable_packages & image_packages)
+
+    # Split duplicates based on whether they have files in upper layer
+    duplicates = []
+    status_only_duplicates = []
+
+    for pkg in all_duplicates:
+        if has_files_in_upper(pkg, upper_dir):
+            duplicates.append(pkg)
+        else:
+            status_only_duplicates.append(pkg)
 
     reinstall: List[str] = []
     if current_status and current_status.exists():
@@ -52,7 +88,12 @@ def compute_reconcile_plan(
         )
 
     upgrade = sorted(writable_packages)
-    return ReconcilePlan(duplicates=duplicates, reinstall=reinstall, upgrade=upgrade)
+    return ReconcilePlan(
+        duplicates=duplicates,
+        status_only_duplicates=status_only_duplicates,
+        reinstall=reinstall,
+        upgrade=upgrade
+    )
 
 
 def prune_writable_status(writable_status: Path, image_packages: Iterable[str]) -> bool:

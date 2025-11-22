@@ -13,6 +13,7 @@ from calculinux_update.opkg.overlayfs import (
     cleanup_whiteouts_for_packages,
     find_whiteout_files,
     get_package_files,
+    has_files_in_upper,
     is_whiteout_file,
     remount_overlayfs,
 )
@@ -398,6 +399,111 @@ class TestRemountOverlayfs:
             timeout=10,
         )
 
+
+class TestHasFilesInUpper:
+    """Tests for has_files_in_upper function."""
+
+    def test_has_files_in_upper_with_real_files(self, tmp_path):
+        """Test package with actual files in upper layer."""
+        # Create real file structure
+        (tmp_path / "usr" / "bin").mkdir(parents=True)
+        (tmp_path / "etc").mkdir()
+
+        real_file = tmp_path / "usr" / "bin" / "test-app"
+        real_file.write_text("#!/bin/sh\necho test")
+
+        mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            result = has_files_in_upper("test-package", str(tmp_path))
+
+        assert result is True
+
+    def test_has_files_in_upper_only_whiteouts(self, tmp_path):
+        """Test package with only whiteout files (no real files)."""
+        (tmp_path / "usr" / "bin").mkdir(parents=True)
+
+        whiteout = tmp_path / "usr" / "bin" / "test-app"
+        whiteout.touch()
+
+        mock_files = ["/usr/bin/test-app"]
+
+        def mock_is_whiteout(path):
+            return path == whiteout
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            with patch(
+                "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
+            ):
+                result = has_files_in_upper("test-package", str(tmp_path))
+
+        assert result is False
+
+    def test_has_files_in_upper_no_files_exist(self, tmp_path):
+        """Test package where files don't exist in upper layer at all."""
+        mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            result = has_files_in_upper("test-package", str(tmp_path))
+
+        assert result is False
+
+    def test_has_files_in_upper_mixed_files_and_whiteouts(self, tmp_path):
+        """Test package with both real files and whiteouts."""
+        (tmp_path / "usr" / "bin").mkdir(parents=True)
+        (tmp_path / "etc").mkdir()
+
+        real_file = tmp_path / "usr" / "bin" / "test-app"
+        real_file.write_text("content")
+
+        whiteout = tmp_path / "etc" / "test.conf"
+        whiteout.touch()
+
+        mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
+
+        def mock_is_whiteout(path):
+            return path == whiteout
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            with patch(
+                "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
+            ):
+                result = has_files_in_upper("test-package", str(tmp_path))
+
+        # Should return True because at least one real file exists
+        assert result is True
+
+    def test_has_files_in_upper_no_package_files(self, tmp_path):
+        """Test package with no files listed by opkg."""
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=[]):
+            result = has_files_in_upper("test-package", str(tmp_path))
+
+        assert result is False
+
+    def test_has_files_in_upper_file_access_error(self, tmp_path):
+        """Test handling of file access errors."""
+        mock_files = ["/usr/bin/test-app"]
+
+        def mock_exists():
+            raise OSError("Permission denied")
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            with patch("pathlib.Path.exists", side_effect=mock_exists):
+                result = has_files_in_upper("test-package", str(tmp_path))
+
+        # Should handle error gracefully and return False
+        assert result is False
+
+    def test_has_files_in_upper_directory(self, tmp_path):
+        """Test that directories count as real files."""
+        (tmp_path / "usr" / "share" / "test-app").mkdir(parents=True)
+
+        mock_files = ["/usr/share/test-app"]
+
+        with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
+            result = has_files_in_upper("test-package", str(tmp_path))
+
+        assert result is True
     def test_remount_failure(self):
         """Test remount failure."""
         with patch("subprocess.run") as mock_run:
