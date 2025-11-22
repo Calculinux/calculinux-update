@@ -276,8 +276,12 @@ def test_remove_duplicates_handles_failures(monkeypatch):
         return SimpleNamespace(returncode=1, stderr="boom", stdout="")
 
     monkeypatch.setattr(hooks.subprocess, "run", fake_run)
-    # Mock cleanup_whiteouts_for_packages to avoid additional subprocess calls
-    monkeypatch.setattr(hooks, "cleanup_whiteouts_for_packages", lambda packages: len(packages))
+    # Mock get_package_files to return empty list (simulating no files found)
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
+    # Mock cleanup_whiteouts_for_packages to accept the new parameter
+    monkeypatch.setattr(
+        hooks, "cleanup_whiteouts_for_packages", lambda packages, **kwargs: len(packages)
+    )
     hooks._remove_duplicates(["good", "bad"])
     assert calls == ["good", "bad"]
 
@@ -373,57 +377,6 @@ def test_get_current_boot_id_missing(monkeypatch):
 
     boot_id = hooks._get_current_boot_id()
     assert boot_id is None
-
-
-def test_migrate_legacy_state_files(tmp_path, monkeypatch):
-    """Test migration of legacy pending files."""
-    legacy_reinstall = tmp_path / "legacy-reinstall"
-    legacy_upgrade = tmp_path / "legacy-upgrade"
-    new_reinstall = tmp_path / "new-reinstall"
-    new_upgrade = tmp_path / "new-upgrade"
-
-    legacy_reinstall.write_text("foo\nbar\n")
-    legacy_upgrade.write_text("baz\n")
-
-    monkeypatch.setattr(hooks, "LEGACY_PENDING_REINSTALL", legacy_reinstall)
-    monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE", legacy_upgrade)
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", new_reinstall)
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", new_upgrade)
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-
-    hooks._migrate_legacy_state_files()
-
-    # Check migration happened
-    assert new_reinstall.exists()
-    assert new_upgrade.exists()
-    assert new_reinstall.read_text() == "foo\nbar\n"
-    assert new_upgrade.read_text() == "baz\n"
-
-    # Check old files removed
-    assert not legacy_reinstall.exists()
-    assert not legacy_upgrade.exists()
-
-
-def test_migrate_legacy_state_files_skip_if_new_exists(tmp_path, monkeypatch):
-    """Test that migration skips if new file already exists."""
-    legacy = tmp_path / "legacy"
-    new = tmp_path / "new"
-
-    legacy.write_text("old")
-    new.write_text("existing")
-
-    monkeypatch.setattr(hooks, "LEGACY_PENDING_REINSTALL", legacy)
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", new)
-    monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE", tmp_path / "none")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "none2")
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-
-    hooks._migrate_legacy_state_files()
-
-    # New file should not be overwritten
-    assert new.read_text() == "existing"
-    # Old file should remain
-    assert legacy.exists()
 
 
 def test_save_pre_update_state(tmp_path, monkeypatch):

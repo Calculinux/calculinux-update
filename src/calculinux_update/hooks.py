@@ -6,14 +6,13 @@ import argparse
 import fcntl
 import logging
 import os
-import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from .opkg.overlayfs import cleanup_whiteouts_for_packages
+from .opkg.overlayfs import cleanup_whiteouts_for_packages, get_package_files
 from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
@@ -46,10 +45,6 @@ STATUS_PRUNED_MARKER = STATE_DIR / "status-pruned"
 
 # Cache directory
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
-
-# Legacy file paths for migration
-LEGACY_PENDING_REINSTALL = Path("/var/lib/opkg/opkg-status-hook.pending-reinstalls")
-LEGACY_PENDING_UPGRADE = Path("/var/lib/opkg/opkg-status-hook.pending-upgrades")
 
 
 @contextmanager
@@ -125,25 +120,6 @@ def _ensure_state_dir() -> None:
         # In test environments or when running without permissions,
         # this will fail. That's OK - the tests will mock the paths anyway.
         LOG.debug("could not create state directory: %s", e)
-
-
-def _migrate_legacy_state_files() -> None:
-    """Migrate state files from old /var/lib/opkg/ location to new location."""
-    _ensure_state_dir()
-
-    migrations = [
-        (LEGACY_PENDING_REINSTALL, PENDING_REINSTALL_FILE),
-        (LEGACY_PENDING_UPGRADE, PENDING_UPGRADE_FILE),
-    ]
-
-    for old_path, new_path in migrations:
-        if old_path.exists() and not new_path.exists():
-            LOG.info("migrating %s -> %s", old_path, new_path)
-            try:
-                shutil.copy2(old_path, new_path)
-                old_path.unlink()
-            except (OSError, IOError) as e:
-                LOG.warning("failed to migrate %s: %s", old_path, e)
 
 
 def _get_booted_slot_name() -> Optional[str]:
@@ -439,9 +415,6 @@ def postreboot_entrypoint() -> None:
 
     # Use locking to prevent concurrent operations
     with _state_lock():
-        # Migrate legacy state files if they exist
-        _migrate_legacy_state_files()
-
         # Check for rollback first
         rollback_info = _detect_rollback()
         if rollback_info["is_rollback"]:
@@ -518,6 +491,13 @@ def _prune_status_only_duplicates(packages: List[str]) -> None:
 
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
     removed_packages = []
+    package_files_map = {}
+
+    # Get file lists BEFORE removal since opkg remove will delete the package info
+    for pkg in duplicates:
+        files = get_package_files(pkg)
+        if files:
+            package_files_map[pkg] = files
 
     for pkg in duplicates:
         LOG.info("removing duplicate package %s", pkg)
@@ -535,9 +515,13 @@ def _remove_duplicates(duplicates: Iterable[str]) -> None:
     # Clean up OverlayFS whiteouts for successfully removed packages
     # This ensures files from the base image become visible again
     if removed_packages:
-        LOG.info("cleaning up OverlayFS whiteouts for %d removed packages", len(removed_packages))
+        LOG.info(
+            "cleaning up OverlayFS whiteouts for %d removed packages", len(removed_packages)
+        )
         try:
-            whiteouts_removed = cleanup_whiteouts_for_packages(removed_packages)
+            whiteouts_removed = cleanup_whiteouts_for_packages(
+                removed_packages, file_lists=package_files_map
+            )
             if whiteouts_removed > 0:
                 LOG.info(
                     "removed %d whiteout file(s), overlay remounted to expose base image files",
@@ -590,6 +574,9 @@ def _remove_duplicate_pkg(pkg: str) -> bool:
 
     This physically removes the package and cleans up any OverlayFS whiteouts.
     """
+    # Get file list BEFORE removal since opkg remove will delete the package info
+    file_list = get_package_files(pkg)
+
     LOG.info("removing duplicate package %s from upper layer", pkg)
     result = subprocess.run(
         ["opkg", "remove", "--nodeps", pkg],
@@ -603,11 +590,13 @@ def _remove_duplicate_pkg(pkg: str) -> bool:
 
     # Clean up OverlayFS whiteouts for the removed package
     try:
-        whiteouts_removed = cleanup_whiteouts_for_packages([pkg])
+        file_lists = {pkg: file_list} if file_list else {}
+        whiteouts_removed = cleanup_whiteouts_for_packages([pkg], file_lists=file_lists)
         if whiteouts_removed > 0:
             LOG.info(
                 "removed %d whiteout file(s) for %s, overlay remounted",
-                whiteouts_removed, pkg
+                whiteouts_removed,
+                pkg,
             )
     except Exception as e:
         LOG.warning("error during whiteout cleanup for %s: %s", pkg, e)

@@ -36,11 +36,39 @@ LOGGER = logging.getLogger(__name__)
 __all__ = [
     "cleanup_package_whiteouts",
     "cleanup_whiteouts_for_packages",
+    "cleanup_opkg_metadata_whiteouts",
     "get_package_files",
     "find_whiteout_files",
     "has_files_in_upper",
     "remount_overlayfs",
 ]
+
+
+def is_package_in_writable_status(package_name: str) -> bool:
+    """
+    Check if a package is in the writable status file.
+
+    Uses opkg's --writable-only flag to properly query only the writable
+    status file, ignoring packages in the base image.
+
+    Args:
+        package_name: Name of the package to check
+
+    Returns:
+        True if package is in writable status, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["opkg", "status", "--writable-only", package_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # Check if package found and installed
+        return result.returncode == 0 and "Status: install ok installed" in result.stdout
+    except (subprocess.SubprocessError, OSError) as e:
+        LOGGER.warning("Failed to check writable status for %s: %s", package_name, e)
+        return False
 
 
 def get_package_files(package_name: str) -> List[str]:
@@ -137,7 +165,8 @@ def find_whiteout_files(file_paths: List[str], upper_dir: str = "/") -> List[Pat
 def cleanup_package_whiteouts(
     package_name: str,
     upper_dir: str = "/",
-    dry_run: bool = False
+    dry_run: bool = False,
+    file_list: List[str] | None = None,
 ) -> int:
     """
     Clean up OverlayFS whiteout files for a removed package.
@@ -146,36 +175,35 @@ def cleanup_package_whiteouts(
     that was shadowing files in the base image. It finds and removes whiteout
     files that would block access to the base image files.
 
+    IMPORTANT: After `opkg remove`, the package is no longer in opkg's database,
+    so `opkg files` will return nothing. Either call this BEFORE removal, or
+    provide the file_list explicitly.
+
     Args:
         package_name: Name of the package that was removed
         upper_dir: Root directory of the overlay upper layer (default: /)
         dry_run: If True, only report what would be removed without removing
+        file_list: Optional pre-fetched list of files for the package. If None,
+            will attempt to get from opkg (which only works if package still exists
+            in opkg's database).
 
     Returns:
         Number of whiteout files removed (or that would be removed in dry_run)
     """
-    # First check if the package is actually installed
-    # If it's still installed, we shouldn't be cleaning up whiteouts
-    try:
-        result = subprocess.run(
-            ["opkg", "status", package_name],
-            capture_output=True,
-            text=True,
-            timeout=5,
+    # Check if the package is still in the writable status file
+    if is_package_in_writable_status(package_name):
+        LOGGER.debug(
+            "Package %s is still in writable status, skipping whiteout cleanup",
+            package_name,
         )
-        if result.returncode == 0 and "Status: install ok installed" in result.stdout:
-            LOGGER.debug(
-                "Package %s is still installed, skipping whiteout cleanup",
-                package_name
-            )
-            return 0
-    except (subprocess.SubprocessError, OSError) as e:
-        LOGGER.warning("Could not verify package status for %s: %s", package_name, e)
-        # Continue anyway - better to try cleaning up than skip
+        return 0
 
     # Get the file list for the package
-    # Note: opkg may still have cached info even after removal
-    file_paths = get_package_files(package_name)
+    if file_list is not None:
+        file_paths = file_list
+    else:
+        # Try to get from opkg - this only works if package still in database
+        file_paths = get_package_files(package_name)
 
     if not file_paths:
         LOGGER.debug("No file list found for package %s", package_name)
@@ -210,6 +238,68 @@ def cleanup_package_whiteouts(
         LOGGER.info(
             "%s %d whiteout file(s) for package %s",
             action, removed_count, package_name
+        )
+
+    return removed_count
+
+
+def cleanup_opkg_metadata_whiteouts(
+    package_name: str, info_dir: str = "/var/lib/opkg/info", dry_run: bool = False
+) -> int:
+    """
+    Clean up OverlayFS whiteout files for opkg metadata after package removal.
+
+    When opkg removes a package from the upper layer, it deletes the metadata files
+    in /var/lib/opkg/info/ (e.g., package.list, package.control). OverlayFS then
+    creates whiteout files that hide the base image's metadata files, preventing
+    queries like 'opkg files package' from working even though the package exists
+    in status.image.
+
+    This function removes those whiteout files to expose the base image's metadata.
+
+    Args:
+        package_name: Name of the package whose metadata whiteouts to remove
+        info_dir: Directory containing opkg metadata (default: /var/lib/opkg/info)
+        dry_run: If True, only report what would be removed without removing
+
+    Returns:
+        Number of whiteout files removed (or that would be removed in dry_run)
+    """
+    info_path = Path(info_dir)
+    if not info_path.exists():
+        LOGGER.debug("Info directory %s does not exist", info_dir)
+        return 0
+
+    removed_count = 0
+
+    # Check for whiteout files matching the package
+    # OverlayFS creates .wh.<filename> for whited out files
+    pattern = f".wh.{package_name}.*"
+
+    try:
+        for whiteout in info_path.glob(pattern):
+            if is_whiteout_file(whiteout):
+                try:
+                    if dry_run:
+                        LOGGER.info("Would remove metadata whiteout: %s", whiteout)
+                        removed_count += 1
+                    else:
+                        whiteout.unlink()
+                        LOGGER.info("Removed metadata whiteout: %s", whiteout)
+                        removed_count += 1
+                except OSError as e:
+                    LOGGER.warning("Failed to remove metadata whiteout %s: %s", whiteout, e)
+
+    except (OSError, IOError) as e:
+        LOGGER.warning("Error scanning for metadata whiteouts in %s: %s", info_dir, e)
+
+    if removed_count > 0:
+        action = "Would remove" if dry_run else "Removed"
+        LOGGER.info(
+            "%s %d metadata whiteout file(s) for package %s",
+            action,
+            removed_count,
+            package_name,
         )
 
     return removed_count
@@ -291,7 +381,8 @@ def cleanup_whiteouts_for_packages(
     package_names: List[str],
     upper_dir: str = "/",
     dry_run: bool = False,
-    remount: bool = True
+    remount: bool = True,
+    file_lists: dict[str, List[str]] | None = None,
 ) -> int:
     """
     Clean up OverlayFS whiteout files for multiple removed packages.
@@ -301,6 +392,9 @@ def cleanup_whiteouts_for_packages(
         upper_dir: Root directory of the overlay upper layer (default: /)
         dry_run: If True, only report what would be removed
         remount: If True, remount the overlay after cleanup to pick up changes
+        file_lists: Optional dict mapping package names to their file lists.
+            Should be fetched BEFORE calling opkg remove since removal deletes
+            the package from opkg's database.
 
     Returns:
         Total number of whiteout files removed across all packages
@@ -309,12 +403,22 @@ def cleanup_whiteouts_for_packages(
 
     for package_name in package_names:
         try:
-            removed = cleanup_package_whiteouts(package_name, upper_dir, dry_run)
+            # Clean up package file whiteouts
+            file_list = file_lists.get(package_name) if file_lists else None
+            removed = cleanup_package_whiteouts(
+                package_name, upper_dir, dry_run, file_list=file_list
+            )
             total_removed += removed
+
+            # Clean up opkg metadata whiteouts to expose base image's .list, .control, etc.
+            metadata_removed = cleanup_opkg_metadata_whiteouts(package_name, dry_run=dry_run)
+            total_removed += metadata_removed
+
         except Exception as e:
             LOGGER.error(
                 "Error cleaning up whiteouts for package %s: %s",
-                package_name, e
+                package_name,
+                e,
             )
 
     # Remount the overlay if we actually removed any whiteouts

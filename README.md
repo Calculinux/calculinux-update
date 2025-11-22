@@ -155,47 +155,65 @@ The `calculinux-update` tool solves this with automatic package reconciliation t
 
 ### How It Works
 
-**During RAUC Install** (via `cup-hook` in `slot-post-install` phase):
-1. **Prune duplicates**: Removes any packages from the overlay that are now provided by the new image
-2. **Clean up OverlayFS whiteouts**: Removes whiteout files that would block access to base image files (see below)
-3. **Snapshot current state**: Records which packages exist in the currently-booted slot
-4. **Plan reconciliation**: Computes which packages need to be reinstalled or upgraded after reboot
-5. **Prefetch packages** (optional): Downloads packages that will be needed post-reboot so the system can work offline
+**Phase 1: During RAUC Install** (via `cup-hook` in `slot-post-install` phase):
+1. **Detect duplicates**: Identifies packages that exist in both the writable overlay and the new base image
+2. **Two-phase duplicate removal**:
+   - **Status-only duplicates**: Packages with no actual files in the upper layer are removed from the status file immediately (safe before reboot)
+   - **Physical duplicates**: Packages with actual files in the upper layer are queued for removal after reboot
+3. **Clean up OverlayFS whiteouts**: After removing packages, cleans up whiteout files that would block access to base image files (see below)
+4. **Clean up opkg metadata whiteouts**: Removes whiteout files in `/var/lib/opkg/info/` that hide base image metadata
+5. **Snapshot current state**: Records which packages exist in the currently-booted slot
+6. **Plan reconciliation**: Computes which packages need to be reinstalled or upgraded after reboot
+7. **Prefetch packages** (optional): Downloads packages that will be needed post-reboot so the system can work offline
 
-**After Reboot** (via `cup-postreboot` systemd service):
-1. Runs `opkg update` to refresh package feeds
-2. **Reinstalls** packages that were present in the old image but missing from the new one
-3. **Upgrades** all overlay packages to match versions in the new base image
-4. Cleans up pending operation lists on success
+**Phase 2: After Reboot** (via `cup-postreboot` systemd service):
+1. **Remove physical duplicates**: Completes removal of packages that had files in the upper layer
+2. Runs `opkg update` to refresh package feeds
+3. **Reinstalls** packages that were present in the old image but missing from the new one
+4. **Upgrades** all overlay packages to match versions in the new base image
+5. Cleans up pending operation lists on success
 
 ### OverlayFS Whiteout Cleanup
 
 Calculinux uses OverlayFS to provide a writable layer on top of the read-only base image. A specific edge case can occur during updates:
 
 **The Problem:**
-1. User installs a package (e.g., SDL) from the overlay that shadows files in the base image
+1. User installs a package (e.g., SDL) into the overlay that shadows files in the base image
 2. A new RAUC update integrates a newer version of that same package (SDL) into the base image
 3. During reconciliation, the duplicate package is removed from the overlay using `opkg remove`
 4. OverlayFS creates "whiteout" files (character devices with major:minor 0:0) for each removed file that has a corresponding file in the lower layer
 5. These whiteouts persist after package removal, blocking access to the newer version in the base image
+6. Additionally, opkg creates metadata whiteouts in `/var/lib/opkg/info/` (e.g., `.wh.package.list`) that hide base image metadata files
 
 **The Solution:**
-The reconciliation system automatically detects and removes these whiteout files when removing duplicate packages. This happens during the `slot-post-install` phase:
+The reconciliation system automatically detects and removes two types of whiteout files:
 
-1. Track which packages were successfully removed
-2. Query opkg for the file list of each removed package
-3. Check each file path for whiteout files (character device 0:0)
-4. Remove whiteout files to expose the base image files
-5. Remount the overlay to pick up the changes immediately
-6. Continue with the rest of the reconciliation process
+**Package File Whiteouts:**
+After removing duplicate packages, the system:
+1. Pre-fetches the file list for each package **before** calling `opkg remove` (since removal deletes the package from the database)
+2. Checks each file path for whiteout files (character device 0:0)
+3. Removes whiteout files to expose the base image files
+4. Remounts the overlay to pick up the changes immediately
 
-**Important Note:**
-The overlay is automatically remounted after whiteout cleanup to ensure changes are immediately visible. The system will also naturally remount during the reboot following the update.
+**Metadata Whiteouts:**
+When `opkg remove` deletes metadata files in `/var/lib/opkg/info/`, OverlayFS creates whiteouts that hide the base image's metadata:
+1. After package removal, scans `/var/lib/opkg/info/` for `.wh.package.*` files
+2. Verifies they are actual whiteouts (character device 0:0)
+3. Removes them to expose base image metadata files (`.list`, `.control`, etc.)
+4. This allows commands like `opkg files package` to work even after the overlay version is removed
 
-**Technical Details:**
-- Whiteout files are character devices with device number 0:0
-- They are **only** created when a file in the upper layer is deleted **and** a file with the same name exists in the lower layer
-- The cleanup process uses `opkg files <package>` to get the file list for removed packages
+**Enhanced opkg Integration:**
+The system now uses enhanced opkg functionality for proper split-status file handling:
+- `opkg status --writable-only package`: Queries only the writable status file
+- `opkg status --image-only package`: Queries only the base image status file
+- `opkg status --show-source package`: Shows which status file contains the package
+
+These flags eliminate the need for manual status file parsing and provide a proper API for dual-layer package management.
+
+**Important Notes:**
+- The overlay is automatically remounted after whiteout cleanup to ensure changes are immediately visible
+- The system will also naturally remount during the reboot following the update
+- File lists are pre-fetched **before** package removal to avoid querying removed packages
 - Only whiteout files corresponding to removed packages are deleted, preserving other legitimate character devices
 - Errors during whiteout cleanup are logged but don't prevent the update from proceeding
 - This cleanup is essential for scenarios where user overlay packages are superseded by newer base image versions

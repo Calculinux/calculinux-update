@@ -9,11 +9,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from calculinux_update.opkg.overlayfs import (
+    cleanup_opkg_metadata_whiteouts,
     cleanup_package_whiteouts,
     cleanup_whiteouts_for_packages,
     find_whiteout_files,
     get_package_files,
     has_files_in_upper,
+    is_package_in_writable_status,
     is_whiteout_file,
     remount_overlayfs,
 )
@@ -398,6 +400,173 @@ class TestRemountOverlayfs:
             text=True,
             timeout=10,
         )
+
+
+class TestCleanupOpkgMetadataWhiteouts:
+    """Test cleanup_opkg_metadata_whiteouts function."""
+
+    def test_cleanup_metadata_whiteouts_success(self, tmp_path, mocker):
+        """Test successful cleanup of metadata whiteouts."""
+        info_dir = tmp_path / "info"
+        info_dir.mkdir()
+        package = "test-pkg"
+
+        # Create whiteout files for package metadata
+        whiteout_files = [
+            info_dir / f".wh.{package}.list",
+            info_dir / f".wh.{package}.control",
+            info_dir / f".wh.{package}.conffiles",
+        ]
+
+        for wh in whiteout_files:
+            wh.touch()
+
+        # Mock stat to make files appear as whiteout devices
+        mock_stat = mocker.MagicMock()
+        mock_stat.st_mode = stat.S_IFCHR
+        mock_stat.st_rdev = os.makedev(0, 0)
+        mocker.patch("os.stat", return_value=mock_stat)
+
+        mock_unlink = mocker.patch("pathlib.Path.unlink")
+
+        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
+
+        assert result == len(whiteout_files)
+        # Should have called unlink for each whiteout
+        assert mock_unlink.call_count == len(whiteout_files)
+
+    def test_cleanup_metadata_whiteouts_dry_run(self, tmp_path, mocker):
+        """Test dry-run mode doesn't remove files."""
+        info_dir = tmp_path / "info"
+        info_dir.mkdir()
+        package = "test-pkg"
+
+        # Create whiteout file
+        wh = info_dir / f".wh.{package}.list"
+        wh.touch()
+
+        mock_stat = mocker.MagicMock()
+        mock_stat.st_mode = stat.S_IFCHR
+        mock_stat.st_rdev = os.makedev(0, 0)
+        mocker.patch("os.stat", return_value=mock_stat)
+
+        mock_unlink = mocker.patch("pathlib.Path.unlink")
+
+        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir), dry_run=True)
+
+        assert result == 1
+        mock_unlink.assert_not_called()
+
+    def test_cleanup_metadata_whiteouts_no_whiteouts(self, tmp_path, mocker):
+        """Test when no whiteouts exist."""
+        info_dir = tmp_path / "info"
+        info_dir.mkdir()
+        package = "test-pkg"
+
+        mock_unlink = mocker.patch("pathlib.Path.unlink")
+
+        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
+
+        assert result == 0
+        mock_unlink.assert_not_called()
+
+    def test_cleanup_metadata_whiteouts_not_whiteout_device(self, tmp_path, mocker):
+        """Test that regular files are not removed."""
+        info_dir = tmp_path / "info"
+        info_dir.mkdir()
+        package = "test-pkg"
+
+        # Create regular file (not whiteout)
+        regular_file = info_dir / f".wh.{package}.list"
+        regular_file.write_text("not a whiteout")
+
+        mock_unlink = mocker.patch("pathlib.Path.unlink")
+
+        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
+
+        assert result == 0
+        mock_unlink.assert_not_called()
+
+    def test_cleanup_metadata_whiteouts_error_handling(self, tmp_path, mocker):
+        """Test error handling during removal."""
+        info_dir = tmp_path / "info"
+        info_dir.mkdir()
+        package = "test-pkg"
+
+        wh = info_dir / f".wh.{package}.list"
+        wh.touch()
+
+        mock_stat = mocker.MagicMock()
+        mock_stat.st_mode = stat.S_IFCHR
+        mock_stat.st_rdev = os.makedev(0, 0)
+        mocker.patch("os.stat", return_value=mock_stat)
+
+        mock_unlink = mocker.patch("pathlib.Path.unlink", side_effect=OSError("Permission denied"))
+
+        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
+
+        # Error occurs during unlink(), so no count increment
+        assert result == 0
+        mock_unlink.assert_called_once()
+
+
+class TestIsPackageInWritableStatus:
+    """Test is_package_in_writable_status function."""
+
+    def test_uses_opkg_writable_only_flag(self, mocker):
+        """Test that function uses opkg --writable-only when available."""
+        package = "test-pkg"
+        mock_run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(
+                returncode=0, stdout="Package: test-pkg\nStatus: install ok installed\n"
+            ),
+        )
+
+        result = is_package_in_writable_status(package)
+
+        assert result is True
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        assert "--writable-only" in call_args[0][0]
+        assert "status" in call_args[0][0]
+        assert package in call_args[0][0]
+
+    def test_package_not_in_writable_status(self, mocker):
+        """Test when package is not in writable status."""
+        package = "test-pkg"
+        # Empty output means not found
+        mocker.patch(
+            "subprocess.run", return_value=mocker.MagicMock(returncode=0, stdout="")
+        )
+
+        result = is_package_in_writable_status(package)
+
+        assert result is False
+
+    def test_command_fails(self, mocker):
+        """Test when opkg command fails."""
+        package = "test-pkg"
+        mocker.patch(
+            "subprocess.run",
+            side_effect=subprocess.SubprocessError("Command failed"),
+        )
+
+        result = is_package_in_writable_status(package)
+
+        assert result is False
+
+    def test_command_returns_error(self, mocker):
+        """Test when opkg returns non-zero exit code."""
+        package = "test-pkg"
+        mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=1, stdout=""),
+        )
+
+        result = is_package_in_writable_status(package)
+
+        assert result is False
 
 
 class TestHasFilesInUpper:

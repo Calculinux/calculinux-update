@@ -204,40 +204,150 @@ file from bundle extras (via
 environment variable) and performs complete reconciliation planning:
 .RS
 .IP 1. 3
-Removes duplicate packages from writable overlay (packages now in base)
+Identifies duplicate packages (present in both overlay and new base image)
 .IP 2.
-Prunes writable status file to remove entries for base packages
+Performs two\-phase duplicate removal:
+.RS
+.IP a. 3
+.B Status\-only duplicates:
+Packages with no actual files in upper layer are removed from status file immediately (safe before reboot)
+.IP b.
+.B Physical duplicates:
+Packages with actual files in upper layer are queued for removal after reboot
+.RE
 .IP 3.
-Identifies packages to reinstall (removed from new base)
+Cleans up OverlayFS whiteout files for removed packages (see
+.B WHITEOUT CLEANUP
+section)
 .IP 4.
-Identifies packages to upgrade (writable packages needing version updates)
+Cleans up opkg metadata whiteouts in /var/lib/opkg/info/ to expose base image metadata
 .IP 5.
-Writes pending operation files for post\-reboot execution
+Identifies packages to reinstall (removed from new base)
 .IP 6.
+Identifies packages to upgrade (writable packages needing version updates)
+.IP 7.
+Writes pending operation files for post\-reboot execution
+.IP 8.
 Sets status\-pruned marker to indicate completion
 .RE
 .IP
-All planning and duplicate removal happens
+The two\-phase approach prevents temporary library access issues:
+.B status\-only
+duplicates (packages without files in upper layer) are removed immediately since they're safe, while
+.B physical
+duplicates (packages with files in upper layer) are deferred until after reboot when the system has switched to the new slot. All planning happens
 .B before reboot
-while still in the pre\-update environment. The hook ensures the writable status is clean and ready for the new base image.
+while both old and new status files are accessible.
 .TP
 .B Phase 3: Post\-reboot (after slot switch)
 .B cup\-postreboot
-runs on first boot into new slot (triggered by systemd condition on pending files). It simply executes the plan created by the hook:
+runs on first boot into new slot (triggered by systemd condition on pending files). It executes the plan created by the hook:
 .RS
 .IP 1. 3
-Updates package feeds (opkg update)
+Removes physical duplicate packages queued by hook
 .IP 2.
-Reinstalls missing packages (using cached .ipk files if available)
+Cleans up whiteout files for newly removed packages
 .IP 3.
-Upgrades overlay packages to match new base versions
+Updates package feeds (opkg update)
 .IP 4.
+Reinstalls missing packages (using cached .ipk files if available)
+.IP 5.
+Upgrades overlay packages to match new base versions
+.IP 6.
 Cleans up pending files and markers
 .RE
 .IP
-The post\-reboot service contains
-.B no reconciliation logic
-\- it purely executes operations queued by the hook. This separation ensures the complex planning happens before reboot when both old and new status files are accessible.
+The post\-reboot service simply executes operations queued by the hook, ensuring complex planning happens before reboot when both status files are accessible.
+.SH WHITEOUT CLEANUP
+Calculinux uses OverlayFS to provide a writable layer on top of the read\-only base image. Whiteout cleanup addresses two specific edge cases:
+.SS "Package File Whiteouts"
+.TP
+.B The Problem
+When a user\-installed package is removed from the overlay:
+.RS
+.IP 1. 3
+User installs a package (e.g., SDL) into the overlay
+.IP 2.
+New RAUC update integrates that package into the base image
+.IP 3.
+During reconciliation,
+.B opkg remove
+deletes the overlay package
+.IP 4.
+OverlayFS creates whiteout files (character device 0:0) for files that exist in base image
+.IP 5.
+Whiteouts persist, blocking access to newer base image version
+.RE
+.TP
+.B The Solution
+The reconciliation system automatically removes package file whiteouts:
+.RS
+.IP 1. 3
+Pre\-fetches file list for each package
+.B before
+calling
+.B opkg remove
+(removal deletes package from database)
+.IP 2.
+After removal, checks each file path for whiteout files (character device 0:0)
+.IP 3.
+Removes whiteout files to expose base image files
+.IP 4.
+Remounts overlay to pick up changes immediately
+.RE
+.SS "Metadata Whiteouts"
+.TP
+.B The Problem
+When
+.B opkg remove
+deletes metadata files in
+.IR /var/lib/opkg/info/ :
+.RS
+.IP 1. 3
+Package removal deletes files like
+.IR package.list ,
+.IR package.control
+.IP 2.
+OverlayFS creates
+.I .wh.package.list
+whiteout files
+.IP 3.
+Whiteouts hide base image's metadata files
+.IP 4.
+Commands like
+.B opkg files package
+fail even though package exists in base
+.RE
+.TP
+.B The Solution
+After package removal, the system:
+.RS
+.IP 1. 3
+Scans
+.I /var/lib/opkg/info/
+for
+.I .wh.package.*
+files
+.IP 2.
+Verifies they are actual whiteouts (character device 0:0)
+.IP 3.
+Removes whiteouts to expose base image metadata
+.IP 4.
+Allows opkg queries to work correctly
+.RE
+.SS "Enhanced opkg Integration"
+The system uses enhanced opkg functionality for proper split\-status file handling:
+.TP
+.B opkg status \-\-writable\-only
+Queries only the writable status file (/var/lib/opkg/status), ignoring base image packages. Used to verify package removal from overlay.
+.TP
+.B opkg status \-\-image\-only
+Queries only the base image status file (/var/lib/opkg/status.image), ignoring overlay packages.
+.TP
+.B opkg status \-\-show\-source
+Shows which status file(s) contain the package (writable, image, or both).
+.PP
+These flags eliminate manual status file parsing and provide proper API for dual\-layer package management.
 .SH FILES
 .TP
 .I /etc/calculinux\-update.toml
@@ -260,6 +370,9 @@ Packages queued for reinstall after reboot (created by cup\-hook).
 .TP
 .I /var/lib/calculinux\-update/update\-state.pending\-upgrades
 Packages queued for upgrade after reboot (created by cup\-hook).
+.TP
+.I /var/lib/calculinux\-update/update\-state.pending\-duplicates
+Physical duplicate packages queued for removal after reboot (created by cup\-hook). These are packages with actual files in the upper layer that must be removed after switching to the new slot.
 .TP
 .I /var/lib/calculinux\-update/status\-pruned
 Marker file indicating cup\-hook completed status pruning.
@@ -381,13 +494,19 @@ Look for messages like:
 .PP
 .nf
 .RS
-cup\-hook: pruned writable status against new image
-cup\-hook: removed 2 duplicate packages
-cup\-hook: queued 3 packages for reinstall
-cup\-hook: queued 5 packages for upgrade
+cup\-hook: identified 2 status\-only duplicates (safe to remove now)
+cup\-hook: identified 3 physical duplicates (deferred until reboot)
+cup\-hook: removed 2 status\-only duplicate packages
+cup\-hook: removed 15 package whiteout files
+cup\-hook: removed 8 metadata whiteout files
+cup\-hook: queued 3 physical duplicates for post\-reboot removal
+cup\-hook: queued 4 packages for reinstall
+cup\-hook: queued 6 packages for upgrade
 cup\-hook: marked status as pruned for new image
-cup\-postreboot: reinstalling 3 packages from cache
-cup\-postreboot: upgrading 5 packages
+cup\-postreboot: removing 3 physical duplicate packages
+cup\-postreboot: removed 12 whiteout files
+cup\-postreboot: reinstalling 4 packages from cache
+cup\-postreboot: upgrading 6 packages
 cup\-postreboot: reconciliation complete
 .RE
 .fi
@@ -457,8 +576,36 @@ Pending operations are stored in:
 .RS
 /var/lib/calculinux\-update/update\-state.pending\-reinstalls
 /var/lib/calculinux\-update/update\-state.pending\-upgrades
+/var/lib/calculinux\-update/update\-state.pending\-duplicates
 .RE
 .fi
+.TP
+.B "Base image files not accessible after update"
+Whiteout files may be blocking access. Check for character device 0:0 files:
+.PP
+.nf
+.RS
+find /usr /etc /var \-type c \-exec stat {} \\; | grep "Device type: 0,0"
+.RE
+.fi
+.PP
+If whiteout cleanup failed during update, it can be retriggered by the post\-reboot service. Check logs:
+.PP
+.nf
+.RS
+journalctl \-u cup\-postreboot.service | grep whiteout
+.RE
+.fi
+.PP
+Metadata whiteouts in /var/lib/opkg/info/ prevent package queries:
+.PP
+.nf
+.RS
+ls \-la /var/lib/opkg/info/.wh.*
+.RE
+.fi
+.PP
+These should be removed automatically. If they persist, report a bug.
 .TP
 .B "Prefetch fails"
 OPKG may not be configured, or bundle extras may be missing. Check for bundle extras:
