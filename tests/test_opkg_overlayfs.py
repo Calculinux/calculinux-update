@@ -9,15 +9,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 from calculinux_update.opkg.overlayfs import (
-    cleanup_opkg_metadata_whiteouts,
-    cleanup_package_whiteouts,
-    cleanup_whiteouts_for_packages,
-    find_whiteout_files,
+    FileRestorability,
+    restore_opkg_metadata,
+    restore_package_files,
+    restore_files_for_packages,
+    find_restorable_files,
     get_package_files,
     has_files_in_upper,
     is_package_in_writable_status,
-    is_whiteout_file,
-    remount_overlayfs,
 )
 
 
@@ -115,399 +114,189 @@ usr/share/data.txt
             assert files == []
 
 
-class TestIsWhiteoutFile:
-    """Tests for is_whiteout_file function."""
+class TestRestorePackageFiles:
+    """Tests for restore_package_files function."""
 
-    def test_is_whiteout_character_device_0_0(self, tmp_path):
-        """Test detection of character device with major:minor 0:0."""
-        # We can't actually create character devices in tests without root,
-        # so we'll mock the stat result
-        test_file = tmp_path / "test_whiteout"
-        test_file.touch()
-
-        mock_stat = Mock()
-        mock_stat.st_mode = stat.S_IFCHR | 0o666  # Character device
-        mock_stat.st_rdev = os.makedev(0, 0)  # major:minor 0:0
-
-        with patch.object(Path, "stat", return_value=mock_stat):
-            assert is_whiteout_file(test_file) is True
-
-    def test_is_not_whiteout_regular_file(self, tmp_path):
-        """Test that regular files are not detected as whiteouts."""
-        test_file = tmp_path / "regular_file"
-        test_file.write_text("content")
-
-        assert is_whiteout_file(test_file) is False
-
-    def test_is_not_whiteout_directory(self, tmp_path):
-        """Test that directories are not detected as whiteouts."""
-        test_dir = tmp_path / "test_dir"
-        test_dir.mkdir()
-
-        assert is_whiteout_file(test_dir) is False
-
-    def test_is_not_whiteout_char_device_wrong_numbers(self, tmp_path):
-        """Test that character devices with non-0:0 are not whiteouts."""
-        test_file = tmp_path / "test_device"
-        test_file.touch()
-
-        mock_stat = Mock()
-        mock_stat.st_mode = stat.S_IFCHR | 0o666
-        mock_stat.st_rdev = os.makedev(1, 3)  # Not 0:0
-
-        with patch.object(Path, "stat", return_value=mock_stat):
-            assert is_whiteout_file(test_file) is False
-
-    def test_is_whiteout_file_not_exists(self, tmp_path):
-        """Test handling of non-existent file."""
-        test_file = tmp_path / "nonexistent"
-
-        assert is_whiteout_file(test_file) is False
-
-
-class TestFindWhiteoutFiles:
-    """Tests for find_whiteout_files function."""
-
-    def test_find_whiteout_files_with_whiteouts(self, tmp_path):
-        """Test finding whiteout files among package files."""
-        # Create a mock directory structure
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        (tmp_path / "etc").mkdir()
-
-        test_file = tmp_path / "usr" / "bin" / "test-app"
-        whiteout_file = tmp_path / "etc" / "test.conf"
-        test_file.touch()
-        whiteout_file.touch()
-
-        # Mock is_whiteout_file to return True for whiteout_file
-        def mock_is_whiteout(path):
-            return path == whiteout_file
-
-        file_paths = ["/usr/bin/test-app", "/etc/test.conf"]
-
-        with patch(
-            "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
-        ):
-            whiteouts = find_whiteout_files(file_paths, str(tmp_path))
-
-        assert len(whiteouts) == 1
-        assert whiteouts[0] == whiteout_file
-
-    def test_find_whiteout_files_no_whiteouts(self, tmp_path):
-        """Test when no whiteout files exist."""
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        test_file = tmp_path / "usr" / "bin" / "test-app"
-        test_file.touch()
-
-        file_paths = ["/usr/bin/test-app"]
-
-        with patch("calculinux_update.opkg.overlayfs.is_whiteout_file", return_value=False):
-            whiteouts = find_whiteout_files(file_paths, str(tmp_path))
-
-        assert whiteouts == []
-
-    def test_find_whiteout_files_empty_list(self, tmp_path):
-        """Test with empty file list."""
-        whiteouts = find_whiteout_files([], str(tmp_path))
-        assert whiteouts == []
-
-
-class TestCleanupPackageWhiteouts:
-    """Tests for cleanup_package_whiteouts function."""
-
-    def test_cleanup_package_whiteouts_success(self, tmp_path):
-        """Test successful cleanup of whiteout files."""
-        # Setup
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        whiteout1 = tmp_path / "usr" / "bin" / "app"
-        whiteout2 = tmp_path / "usr" / "bin" / "tool"
-        whiteout1.touch()
-        whiteout2.touch()
-
+    def test_restore_package_files_success(self, tmp_path):
+        """Test successful restoration of files."""
         mock_files = ["/usr/bin/app", "/usr/bin/tool", "/usr/bin/other"]
 
-        def mock_is_whiteout(path):
-            return path in [whiteout1, whiteout2]
-
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch(
-                "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
-            ):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = Mock(returncode=1, stdout="")  # Not installed
+            with patch("calculinux_update.opkg.overlayfs.find_restorable_files") as mock_find:
+                with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = Mock(returncode=1, stdout="")  # Not installed
+                        mock_find.return_value = [Path("/usr/bin/app"), Path("/usr/bin/tool")]
 
-                    removed = cleanup_package_whiteouts("test-pkg", str(tmp_path))
+                        restored = restore_package_files("test-pkg")
 
-        assert removed == 2
-        assert not whiteout1.exists()
-        assert not whiteout2.exists()
+        assert restored == 2
 
-    def test_cleanup_package_whiteouts_dry_run(self, tmp_path):
-        """Test dry run mode doesn't actually remove files."""
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        whiteout = tmp_path / "usr" / "bin" / "app"
-        whiteout.touch()
-
+    def test_restore_package_files_dry_run(self, tmp_path):
+        """Test dry run mode doesn't actually restore files."""
         mock_files = ["/usr/bin/app"]
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.is_whiteout_file", return_value=True):
+            with patch("calculinux_update.opkg.overlayfs.find_restorable_files") as mock_find:
                 with patch("subprocess.run") as mock_run:
                     mock_run.return_value = Mock(returncode=1, stdout="")
+                    mock_find.return_value = [Path("/usr/bin/app")]
 
-                    removed = cleanup_package_whiteouts("test-pkg", str(tmp_path), dry_run=True)
+                    restored = restore_package_files("test-pkg", dry_run=True)
 
-        assert removed == 1
-        assert whiteout.exists()  # Should still exist in dry run
+        assert restored == 1
 
-    def test_cleanup_package_whiteouts_package_still_installed(self):
-        """Test that cleanup is skipped if package is still installed."""
+    def test_restore_package_files_package_still_installed(self):
+        """Test that restoration is skipped if package is still installed."""
         mock_status_output = "Status: install ok installed\n"
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stdout=mock_status_output)
 
-            removed = cleanup_package_whiteouts("test-pkg")
+            restored = restore_package_files("test-pkg")
 
-        assert removed == 0
+        assert restored == 0
 
-    def test_cleanup_package_whiteouts_no_files(self):
+    def test_restore_package_files_no_files(self):
         """Test handling when package has no files."""
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=[]):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = Mock(returncode=1, stdout="")
 
-                removed = cleanup_package_whiteouts("test-pkg")
+                restored = restore_package_files("test-pkg")
 
-        assert removed == 0
+        assert restored == 0
 
-    def test_cleanup_package_whiteouts_removal_error(self, tmp_path):
-        """Test handling of file removal errors."""
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        whiteout = tmp_path / "usr" / "bin" / "app"
-        whiteout.touch()
-
+    def test_restore_package_files_restoration_error(self, tmp_path):
+        """Test handling of file restoration errors."""
         mock_files = ["/usr/bin/app"]
 
-        def mock_unlink_error(missing_ok=False):
-            raise OSError("Permission denied")
-
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.is_whiteout_file", return_value=True):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = Mock(returncode=1, stdout="")
+            with patch("calculinux_update.opkg.overlayfs.find_restorable_files") as mock_find:
+                with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=False):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = Mock(returncode=1, stdout="")
+                        mock_find.return_value = [Path("/usr/bin/app")]
 
-                    # Patch the unlink method on the Path object in overlayfs module
-                    with patch("pathlib.Path.unlink", side_effect=mock_unlink_error):
-                        removed = cleanup_package_whiteouts("test-pkg", str(tmp_path))
+                        restored = restore_package_files("test-pkg")
 
         # Should handle the error gracefully
-        assert removed == 0
+        assert restored == 0
 
 
-class TestCleanupWhiteoutsForPackages:
-    """Tests for cleanup_whiteouts_for_packages function."""
+class TestRestoreFilesForPackages:
+    """Tests for restore_files_for_packages function."""
 
-    def test_cleanup_multiple_packages(self, tmp_path):
-        """Test cleaning up whiteouts for multiple packages."""
-        with patch("calculinux_update.opkg.overlayfs.cleanup_package_whiteouts") as mock_cleanup:
-            with patch("calculinux_update.opkg.overlayfs.remount_overlayfs") as mock_remount:
-                mock_cleanup.side_effect = [2, 3, 0]  # Different counts per package
-                mock_remount.return_value = True
+    def test_restore_multiple_packages(self, tmp_path):
+        """Test restoring files for multiple packages."""
+        with patch("calculinux_update.opkg.overlayfs.restore_package_files") as mock_restore:
+            with patch("calculinux_update.opkg.overlayfs.restore_opkg_metadata") as mock_metadata:
+                mock_restore.side_effect = [2, 3, 0]  # Different counts per package
+                mock_metadata.return_value = 1
 
                 packages = ["pkg1", "pkg2", "pkg3"]
-                total = cleanup_whiteouts_for_packages(packages, str(tmp_path))
+                total = restore_files_for_packages(packages)
 
-        assert total == 5
-        assert mock_cleanup.call_count == 3
-        # Should remount since we removed 5 whiteouts
-        mock_remount.assert_called_once_with(str(tmp_path))
+        assert total == 8  # 3 metadata + 5 package files
+        assert mock_restore.call_count == 3
+        assert mock_metadata.call_count == 3
 
-    def test_cleanup_multiple_packages_no_remount_if_none_removed(self, tmp_path):
-        """Test that remount is skipped if no whiteouts were removed."""
-        with patch("calculinux_update.opkg.overlayfs.cleanup_package_whiteouts") as mock_cleanup:
-            with patch("calculinux_update.opkg.overlayfs.remount_overlayfs") as mock_remount:
-                mock_cleanup.return_value = 0  # No whiteouts removed
-
-                packages = ["pkg1", "pkg2"]
-                total = cleanup_whiteouts_for_packages(packages, str(tmp_path))
-
-        assert total == 0
-        # Should not remount since nothing was removed
-        mock_remount.assert_not_called()
-
-    def test_cleanup_multiple_packages_dry_run_no_remount(self, tmp_path):
-        """Test that dry run doesn't remount."""
-        with patch("calculinux_update.opkg.overlayfs.cleanup_package_whiteouts") as mock_cleanup:
-            with patch("calculinux_update.opkg.overlayfs.remount_overlayfs") as mock_remount:
-                mock_cleanup.return_value = 3
+    def test_restore_multiple_packages_dry_run(self, tmp_path):
+        """Test that dry run is passed through correctly."""
+        with patch("calculinux_update.opkg.overlayfs.restore_package_files") as mock_restore:
+            with patch("calculinux_update.opkg.overlayfs.restore_opkg_metadata") as mock_metadata:
+                mock_restore.return_value = 3
+                mock_metadata.return_value = 1
 
                 packages = ["pkg1"]
-                total = cleanup_whiteouts_for_packages(packages, str(tmp_path), dry_run=True)
+                total = restore_files_for_packages(packages, dry_run=True)
 
-        assert total == 3
-        # Should not remount in dry run mode
-        mock_remount.assert_not_called()
+        assert total == 4
 
-    def test_cleanup_multiple_packages_remount_disabled(self, tmp_path):
-        """Test that remount can be explicitly disabled."""
-        with patch("calculinux_update.opkg.overlayfs.cleanup_package_whiteouts") as mock_cleanup:
-            with patch("calculinux_update.opkg.overlayfs.remount_overlayfs") as mock_remount:
-                mock_cleanup.return_value = 3
-
-                packages = ["pkg1"]
-                total = cleanup_whiteouts_for_packages(packages, str(tmp_path), remount=False)
-
-        assert total == 3
-        # Should not remount when explicitly disabled
-        mock_remount.assert_not_called()
-
-    def test_cleanup_multiple_packages_with_error(self, tmp_path):
+    def test_restore_multiple_packages_with_error(self, tmp_path):
         """Test that errors in one package don't stop processing others."""
-        with patch("calculinux_update.opkg.overlayfs.cleanup_package_whiteouts") as mock_cleanup:
-            with patch("calculinux_update.opkg.overlayfs.remount_overlayfs") as mock_remount:
-                mock_cleanup.side_effect = [2, Exception("Test error"), 1]
-                mock_remount.return_value = True
+        with patch("calculinux_update.opkg.overlayfs.restore_package_files") as mock_restore:
+            with patch("calculinux_update.opkg.overlayfs.restore_opkg_metadata") as mock_metadata:
+                mock_restore.side_effect = [2, 1]
+                mock_metadata.side_effect = [1, Exception("Test error"), 1]
 
                 packages = ["pkg1", "pkg2", "pkg3"]
-                total = cleanup_whiteouts_for_packages(packages, str(tmp_path))
+                total = restore_files_for_packages(packages)
 
-        assert total == 3  # Should continue after error
-        assert mock_cleanup.call_count == 3
-        # Should still remount even though one package had an error
-        mock_remount.assert_called_once()
+        # Should continue after error: pkg1 (1+2) + pkg3 (1+1) = 5
+        assert total == 5
+        assert mock_restore.call_count == 2  # pkg1 and pkg3
+        assert mock_metadata.call_count == 3  # All 3 attempted
 
-    def test_cleanup_empty_package_list(self):
+    def test_restore_empty_package_list(self):
         """Test with empty package list."""
-        total = cleanup_whiteouts_for_packages([])
+        total = restore_files_for_packages([])
         assert total == 0
 
 
-class TestRemountOverlayfs:
-    """Tests for remount_overlayfs function."""
+class TestRestoreOpkgMetadata:
+    """Test restore_opkg_metadata function."""
 
-    def test_remount_success(self):
-        """Test successful remount."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
-
-            result = remount_overlayfs("/")
-
-        assert result is True
-        mock_run.assert_called_once_with(
-            ["mount", "-o", "remount", "/"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-
-class TestCleanupOpkgMetadataWhiteouts:
-    """Test cleanup_opkg_metadata_whiteouts function."""
-
-    def test_cleanup_metadata_whiteouts_success(self, tmp_path, mocker):
-        """Test successful cleanup of metadata whiteouts."""
+    def test_restore_metadata_success(self, tmp_path, mocker):
+        """Test successful restoration of metadata files."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
         package = "test-pkg"
 
-        # Create whiteout files for package metadata
-        whiteout_files = [
-            info_dir / f".wh.{package}.list",
-            info_dir / f".wh.{package}.control",
-            info_dir / f".wh.{package}.conffiles",
-        ]
+        # Mock the ioctl functions
+        with patch("calculinux_update.opkg.overlayfs.is_file_restorable", return_value=True):
+            with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+                result = restore_opkg_metadata(package, str(info_dir))
 
-        for wh in whiteout_files:
-            wh.touch()
+        # Should attempt to restore multiple metadata files
+        assert result > 0
 
-        # Mock stat to make files appear as whiteout devices
-        mock_stat = mocker.MagicMock()
-        mock_stat.st_mode = stat.S_IFCHR
-        mock_stat.st_rdev = os.makedev(0, 0)
-        mocker.patch("os.stat", return_value=mock_stat)
-
-        mock_unlink = mocker.patch("pathlib.Path.unlink")
-
-        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
-
-        assert result == len(whiteout_files)
-        # Should have called unlink for each whiteout
-        assert mock_unlink.call_count == len(whiteout_files)
-
-    def test_cleanup_metadata_whiteouts_dry_run(self, tmp_path, mocker):
-        """Test dry-run mode doesn't remove files."""
+    def test_restore_metadata_dry_run(self, tmp_path, mocker):
+        """Test dry run mode for metadata restoration."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
         package = "test-pkg"
 
-        # Create whiteout file
-        wh = info_dir / f".wh.{package}.list"
-        wh.touch()
+        with patch("calculinux_update.opkg.overlayfs.is_file_restorable", return_value=True):
+            result = restore_opkg_metadata(package, str(info_dir), dry_run=True)
 
-        mock_stat = mocker.MagicMock()
-        mock_stat.st_mode = stat.S_IFCHR
-        mock_stat.st_rdev = os.makedev(0, 0)
-        mocker.patch("os.stat", return_value=mock_stat)
+        # Should report what would be restored
+        assert result > 0
 
-        mock_unlink = mocker.patch("pathlib.Path.unlink")
+    def test_restore_metadata_no_info_dir(self):
+        """Test handling when info directory doesn't exist."""
+        result = restore_opkg_metadata("test-pkg", "/nonexistent/path")
+        assert result == 0
 
-        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir), dry_run=True)
-
-        assert result == 1
-        mock_unlink.assert_not_called()
-
-    def test_cleanup_metadata_whiteouts_no_whiteouts(self, tmp_path, mocker):
-        """Test when no whiteouts exist."""
+    def test_restore_metadata_no_restorable_files(self, tmp_path):
+        """Test when no metadata files are restorable."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
         package = "test-pkg"
 
-        mock_unlink = mocker.patch("pathlib.Path.unlink")
-
-        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
+        with patch("calculinux_update.opkg.overlayfs.is_file_restorable", return_value=False):
+            result = restore_opkg_metadata(package, str(info_dir))
 
         assert result == 0
-        mock_unlink.assert_not_called()
 
-    def test_cleanup_metadata_whiteouts_not_whiteout_device(self, tmp_path, mocker):
-        """Test that regular files are not removed."""
+    def test_restore_metadata_partial_restoration(self, tmp_path):
+        """Test when only some metadata files are restorable."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
         package = "test-pkg"
 
-        # Create regular file (not whiteout)
-        regular_file = info_dir / f".wh.{package}.list"
-        regular_file.write_text("not a whiteout")
+        # Mock to return True for some files, False for others
+        call_count = 0
+        def mock_restorable(mount, path):
+            nonlocal call_count
+            call_count += 1
+            return call_count <= 2  # First 2 calls return True
 
-        mock_unlink = mocker.patch("pathlib.Path.unlink")
+        with patch("calculinux_update.opkg.overlayfs.is_file_restorable", side_effect=mock_restorable):
+            with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+                result = restore_opkg_metadata(package, str(info_dir))
 
-        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
-
-        assert result == 0
-        mock_unlink.assert_not_called()
-
-    def test_cleanup_metadata_whiteouts_error_handling(self, tmp_path, mocker):
-        """Test error handling during removal."""
-        info_dir = tmp_path / "info"
-        info_dir.mkdir()
-        package = "test-pkg"
-
-        wh = info_dir / f".wh.{package}.list"
-        wh.touch()
-
-        mock_stat = mocker.MagicMock()
-        mock_stat.st_mode = stat.S_IFCHR
-        mock_stat.st_rdev = os.makedev(0, 0)
-        mocker.patch("os.stat", return_value=mock_stat)
-
-        mock_unlink = mocker.patch("pathlib.Path.unlink", side_effect=OSError("Permission denied"))
-
-        result = cleanup_opkg_metadata_whiteouts(package, str(info_dir))
-
-        # Error occurs during unlink(), so no count increment
-        assert result == 0
-        mock_unlink.assert_called_once()
+        assert result == 2
 
 
 class TestIsPackageInWritableStatus:
@@ -574,37 +363,23 @@ class TestHasFilesInUpper:
 
     def test_has_files_in_upper_with_real_files(self, tmp_path):
         """Test package with actual files in upper layer."""
-        # Create real file structure
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        (tmp_path / "etc").mkdir()
-
-        real_file = tmp_path / "usr" / "bin" / "test-app"
-        real_file.write_text("#!/bin/sh\necho test")
-
         mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
 
+        # Mock: files are in upper (real files)
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            result = has_files_in_upper("test-package", str(tmp_path))
+            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_UPPER):
+                result = has_files_in_upper("test-package")
 
         assert result is True
 
     def test_has_files_in_upper_only_whiteouts(self, tmp_path):
         """Test package with only whiteout files (no real files)."""
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-
-        whiteout = tmp_path / "usr" / "bin" / "test-app"
-        whiteout.touch()
-
         mock_files = ["/usr/bin/test-app"]
 
-        def mock_is_whiteout(path):
-            return path == whiteout
-
+        # Mock: file is a whiteout, so should return False
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch(
-                "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
-            ):
-                result = has_files_in_upper("test-package", str(tmp_path))
+            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.WHITEOUT):
+                result = has_files_in_upper("test-package")
 
         assert result is False
 
@@ -612,32 +387,26 @@ class TestHasFilesInUpper:
         """Test package where files don't exist in upper layer at all."""
         mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
 
+        # Mock: files are in lower only (not in upper)
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            result = has_files_in_upper("test-package", str(tmp_path))
+            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_LOWER_ONLY):
+                result = has_files_in_upper("test-package")
 
         assert result is False
 
     def test_has_files_in_upper_mixed_files_and_whiteouts(self, tmp_path):
         """Test package with both real files and whiteouts."""
-        (tmp_path / "usr" / "bin").mkdir(parents=True)
-        (tmp_path / "etc").mkdir()
-
-        real_file = tmp_path / "usr" / "bin" / "test-app"
-        real_file.write_text("content")
-
-        whiteout = tmp_path / "etc" / "test.conf"
-        whiteout.touch()
-
         mock_files = ["/usr/bin/test-app", "/etc/test.conf"]
 
-        def mock_is_whiteout(path):
-            return path == whiteout
+        # Mock: first file is real (in upper), second is whiteout
+        def mock_restorability(mount, path):
+            if path == "/usr/bin/test-app":
+                return FileRestorability.IN_UPPER
+            return FileRestorability.WHITEOUT
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch(
-                "calculinux_update.opkg.overlayfs.is_whiteout_file", side_effect=mock_is_whiteout
-            ):
-                result = has_files_in_upper("test-package", str(tmp_path))
+            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", side_effect=mock_restorability):
+                result = has_files_in_upper("test-package")
 
         # Should return True because at least one real file exists
         assert result is True
@@ -645,7 +414,7 @@ class TestHasFilesInUpper:
     def test_has_files_in_upper_no_package_files(self, tmp_path):
         """Test package with no files listed by opkg."""
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=[]):
-            result = has_files_in_upper("test-package", str(tmp_path))
+            result = has_files_in_upper("test-package")
 
         assert result is False
 
@@ -658,50 +427,18 @@ class TestHasFilesInUpper:
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
             with patch("pathlib.Path.exists", side_effect=mock_exists):
-                result = has_files_in_upper("test-package", str(tmp_path))
+                result = has_files_in_upper("test-package")
 
         # Should handle error gracefully and return False
         assert result is False
 
     def test_has_files_in_upper_directory(self, tmp_path):
         """Test that directories count as real files."""
-        (tmp_path / "usr" / "share" / "test-app").mkdir(parents=True)
-
         mock_files = ["/usr/share/test-app"]
 
+        # Mock: directory is a real file in upper
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            result = has_files_in_upper("test-package", str(tmp_path))
+            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_UPPER):
+                result = has_files_in_upper("test-package")
 
         assert result is True
-    def test_remount_failure(self):
-        """Test remount failure."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=1, stderr="mount: permission denied")
-
-            result = remount_overlayfs("/")
-
-        assert result is False
-
-    def test_remount_exception(self):
-        """Test remount with exception."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired("mount", 10)
-
-            result = remount_overlayfs("/")
-
-        assert result is False
-
-    def test_remount_custom_mount_point(self):
-        """Test remount with custom mount point."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
-
-            result = remount_overlayfs("/mnt/overlay")
-
-        assert result is True
-        mock_run.assert_called_once_with(
-            ["mount", "-o", "remount", "/mnt/overlay"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )

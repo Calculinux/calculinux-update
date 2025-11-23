@@ -41,7 +41,6 @@ def compute_reconcile_plan(
     writable_status: Path,
     *,
     current_status: Optional[Path] = None,
-    upper_dir: str = "/",
 ) -> ReconcilePlan:
     """Compute package operations required after installing a new slot.
 
@@ -50,13 +49,12 @@ def compute_reconcile_plan(
       but with NO files actually present in the upper layer. These can be safely
       removed from the status file without any physical file operations.
     - duplicates: Packages in both writable status and new base image that DO have
-      files in the upper layer. These need physical removal with opkg + whiteout cleanup.
+      files in the upper layer. These need physical removal with opkg + restoration.
 
     Args:
         image_status: Path to the new base image's status file
         writable_status: Path to the writable overlay's status file
         current_status: Optional path to current running system's status file
-        upper_dir: Root directory of the overlay upper layer (default: /)
 
     Returns:
         ReconcilePlan with categorized package lists
@@ -73,7 +71,7 @@ def compute_reconcile_plan(
     status_only_duplicates = []
 
     for pkg in all_duplicates:
-        if has_files_in_upper(pkg, upper_dir):
+        if has_files_in_upper(pkg):
             duplicates.append(pkg)
         else:
             status_only_duplicates.append(pkg)

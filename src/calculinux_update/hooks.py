@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from .opkg.overlayfs import cleanup_whiteouts_for_packages, get_package_files
+from .opkg.overlayfs import restore_files_for_packages, get_package_files
 from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
@@ -512,23 +512,23 @@ def _remove_duplicates(duplicates: Iterable[str]) -> None:
         else:
             removed_packages.append(pkg)
 
-    # Clean up OverlayFS whiteouts for successfully removed packages
+    # Restore lower layer files for successfully removed packages
     # This ensures files from the base image become visible again
     if removed_packages:
         LOG.info(
-            "cleaning up OverlayFS whiteouts for %d removed packages", len(removed_packages)
+            "restoring lower layer files for %d removed packages", len(removed_packages)
         )
         try:
-            whiteouts_removed = cleanup_whiteouts_for_packages(
+            files_restored = restore_files_for_packages(
                 removed_packages, file_lists=package_files_map
             )
-            if whiteouts_removed > 0:
+            if files_restored > 0:
                 LOG.info(
-                    "removed %d whiteout file(s), overlay remounted to expose base image files",
-                    whiteouts_removed,
+                    "restored %d file(s) from base image",
+                    files_restored,
                 )
         except Exception as e:
-            LOG.warning("error during whiteout cleanup: %s", e)
+            LOG.warning("error during file restoration: %s", e)
 
 
 def _write_pending(path: Path, packages: List[str], label: str) -> None:
@@ -588,18 +588,18 @@ def _remove_duplicate_pkg(pkg: str) -> bool:
         LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
         return False
 
-    # Clean up OverlayFS whiteouts for the removed package
+    # Restore lower layer files for the removed package
     try:
         file_lists = {pkg: file_list} if file_list else {}
-        whiteouts_removed = cleanup_whiteouts_for_packages([pkg], file_lists=file_lists)
-        if whiteouts_removed > 0:
+        files_restored = restore_files_for_packages([pkg], file_lists=file_lists)
+        if files_restored > 0:
             LOG.info(
-                "removed %d whiteout file(s) for %s, overlay remounted",
-                whiteouts_removed,
+                "restored %d file(s) from base image for %s",
+                files_restored,
                 pkg,
             )
     except Exception as e:
-        LOG.warning("error during whiteout cleanup for %s: %s", pkg, e)
+        LOG.warning("error during file restoration for %s: %s", pkg, e)
 
     return True
 

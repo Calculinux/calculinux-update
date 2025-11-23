@@ -278,9 +278,9 @@ def test_remove_duplicates_handles_failures(monkeypatch):
     monkeypatch.setattr(hooks.subprocess, "run", fake_run)
     # Mock get_package_files to return empty list (simulating no files found)
     monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
-    # Mock cleanup_whiteouts_for_packages to accept the new parameter
+    # Mock restore_files_for_packages to accept the new parameter
     monkeypatch.setattr(
-        hooks, "cleanup_whiteouts_for_packages", lambda packages, **kwargs: len(packages)
+        hooks, "restore_files_for_packages", lambda packages, **kwargs: len(packages)
     )
     hooks._remove_duplicates(["good", "bad"])
     assert calls == ["good", "bad"]
