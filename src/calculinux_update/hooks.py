@@ -18,6 +18,7 @@ from .opkg.reconcile import (
     prune_writable_status,
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
+from .opkg.conffiles import detect_modified_conffiles, create_dpkg_new_files
 
 LOG = logging.getLogger("calculinux_update.hooks")
 LOG.setLevel(logging.INFO)
@@ -37,6 +38,7 @@ LOCK_FILE = STATE_DIR / ".lock"
 PENDING_DUPLICATES_FILE = STATE_DIR / "update-state.pending-duplicates"
 PENDING_REINSTALL_FILE = STATE_DIR / "update-state.pending-reinstalls"
 PENDING_UPGRADE_FILE = STATE_DIR / "update-state.pending-upgrades"
+MODIFIED_CONFFILES_FILE = STATE_DIR / "update-state.modified-conffiles"
 PRE_UPDATE_WRITABLE_STATUS = STATE_DIR / "update-state.pre-update-writable"
 PRE_UPDATE_SLOT_NAME = STATE_DIR / "update-state.pre-update-slot"
 UPDATED_SLOT_NAME = STATE_DIR / "update-state.updated-slot"
@@ -398,6 +400,27 @@ def run_slot_hook(hook: str, slot: str) -> None:
     _write_pending(PENDING_REINSTALL_FILE, plan.reinstall, "reinstall")
     _write_pending(PENDING_UPGRADE_FILE, plan.upgrade, "upgrade")
 
+    # Phase 3: Detect modified config files and create .dpkg-new files
+    # This needs to happen before reboot while we have access to both old and new status
+    image_packages = load_package_names(image_status)
+    modified_conffiles = detect_modified_conffiles(list(image_packages))
+    
+    if modified_conffiles:
+        LOG.info("detected %d modified config file(s)", len(modified_conffiles))
+        created_files = create_dpkg_new_files(modified_conffiles)
+        
+        if created_files:
+            LOG.info("created %d .dpkg-new file(s) for modified configs", len(created_files))
+            # Save list of modified conffiles for post-reboot reporting
+            try:
+                _ensure_state_dir()
+                conffile_data = "\n".join(
+                    f"{cf.path}\t{cf.package}" for cf in modified_conffiles
+                )
+                _atomic_write(MODIFIED_CONFFILES_FILE, conffile_data + "\n")
+            except (OSError, IOError) as e:
+                LOG.warning("failed to save modified conffiles list: %s", e)
+
     # Mark status as pruned - the hook has done all the preparation work
     # If there are no pending operations, the post-reboot service won't need to run
     try:
@@ -452,6 +475,9 @@ def postreboot_entrypoint() -> None:
         if duplicates_status and reinstall_status and upgrade_status:
             LOG.info("post-reboot package reconciliation complete")
 
+            # Report modified config files to user
+            _report_modified_conffiles()
+
             # Save boot ID to prevent re-processing
             current_boot_id = _get_current_boot_id()
             if current_boot_id:
@@ -462,7 +488,7 @@ def postreboot_entrypoint() -> None:
                     LOG.warning("failed to save boot ID: %s", e)
 
             # Clean up state files except boot ID (kept to prevent re-processing)
-            for path in [PRE_UPDATE_WRITABLE_STATUS, PRE_UPDATE_SLOT_NAME, UPDATED_SLOT_NAME]:
+            for path in [PRE_UPDATE_WRITABLE_STATUS, PRE_UPDATE_SLOT_NAME, UPDATED_SLOT_NAME, MODIFIED_CONFFILES_FILE]:
                 path.unlink(missing_ok=True)
         else:
             LOG.error("post-reboot reconciliation incomplete; will retry")
@@ -487,6 +513,44 @@ def _prune_status_only_duplicates(packages: List[str]) -> None:
     changed = prune_writable_status(WRITABLE_STATUS, packages)
     if changed:
         LOG.info("pruned %d status-only duplicate(s) from writable status", len(packages))
+
+
+def _report_modified_conffiles() -> None:
+    """Report modified config files to the user.
+    
+    Reads the list of modified conffiles created during the update and logs them
+    along with their corresponding .dpkg-new file locations.
+    """
+    if not MODIFIED_CONFFILES_FILE.exists():
+        return
+    
+    try:
+        with open(MODIFIED_CONFFILES_FILE, 'r') as f:
+            lines = [line.strip() for line in f if line.strip()]
+        
+        if not lines:
+            return
+        
+        LOG.info("=== Modified Configuration Files ===")
+        LOG.info("The following config files were modified and have new versions available:")
+        LOG.info("")
+        
+        for line in lines:
+            parts = line.split('\\t', 1)
+            if len(parts) == 2:
+                conf_path, package = parts
+                dpkg_new = conf_path + '.dpkg-new'
+                LOG.info("  %s (from package: %s)", conf_path, package)
+                LOG.info("    New version saved as: %s", dpkg_new)
+        
+        LOG.info("")
+        LOG.info("To apply the new versions, compare and merge the changes:")
+        LOG.info("  diff <original-file> <original-file>.dpkg-new")
+        LOG.info("  mv <original-file>.dpkg-new <original-file>  # to accept new version")
+        LOG.info("=================================")
+        
+    except (OSError, IOError) as e:
+        LOG.warning("failed to read modified conffiles list: %s", e)
 
 
 def _remove_duplicates(duplicates: Iterable[str]) -> None:
