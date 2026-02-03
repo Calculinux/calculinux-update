@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+import subprocess
+from typing import Iterable, List, Optional, Tuple
 
 from .overlayfs import has_files_in_upper
 from .status import (
@@ -26,6 +27,8 @@ class ReconcilePlan:
     status_only_duplicates: List[str]
     reinstall: List[str]
     upgrade: List[str]
+    broken_abi: List[str]
+    missing_deps: List[str]
 
     def any_actions(self) -> bool:
         return bool(
@@ -33,7 +36,77 @@ class ReconcilePlan:
             or self.status_only_duplicates
             or self.reinstall
             or self.upgrade
+            or self.broken_abi
         )
+
+
+def check_abi_compatibility(
+    writable_packages: Iterable[str],
+    image_status: Path,
+) -> Tuple[List[str], List[str]]:
+    """Check if writable packages have satisfied dependencies in the new image.
+
+    Best-effort check based on `opkg info <pkg>` Depends: fields and package
+    names present in `image_status`.
+    """
+    image_packages = load_package_names(image_status)
+    broken: List[str] = []
+    missing_deps: List[str] = []
+
+    for pkg in sorted(set(writable_packages)):
+        try:
+            result = subprocess.run(
+                ["opkg", "info", pkg],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        if result.returncode != 0:
+            continue
+
+        depends_line = None
+        for line in result.stdout.splitlines():
+            if line.startswith("Depends:"):
+                depends_line = line.split(":", 1)[1].strip()
+                break
+
+        if not depends_line:
+            continue
+
+        for dep in depends_line.split(","):
+            dep = dep.strip()
+            if not dep:
+                continue
+
+            dep_name = dep.split()[0]
+            dep_name = dep_name.split("|")[0].strip()
+            if not dep_name:
+                continue
+
+            # satisfied by new base image
+            if dep_name in image_packages:
+                continue
+
+            # satisfied by writable layer?
+            try:
+                check = subprocess.run(
+                    ["opkg", "status", "--writable-only", dep_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                check = None
+
+            if not check or check.returncode != 0 or "Status: install ok installed" not in check.stdout:
+                missing_deps.append(f"{pkg} -> {dep_name}")
+                if pkg not in broken:
+                    broken.append(pkg)
+
+    return broken, missing_deps
 
 
 def compute_reconcile_plan(
@@ -86,11 +159,14 @@ def compute_reconcile_plan(
         )
 
     upgrade = sorted(writable_packages)
+    broken_abi, missing_deps = check_abi_compatibility(writable_packages, image_status)
     return ReconcilePlan(
         duplicates=duplicates,
         status_only_duplicates=status_only_duplicates,
         reinstall=reinstall,
-        upgrade=upgrade
+        upgrade=upgrade,
+        broken_abi=broken_abi,
+        missing_deps=missing_deps,
     )
 
 

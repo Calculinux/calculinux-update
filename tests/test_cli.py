@@ -2,6 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
+from unittest.mock import patch
+
+from calculinux_update.version_compat import CompatLevel
 
 from calculinux_update.cli import (
     _build_pagination_prompt,
@@ -235,6 +238,98 @@ def test_cli_install_dry_run_skips_binary_check(monkeypatch, tmp_path, mock_root
             "--dry-run",
         ],
     )
+    assert result.exit_code == 0
+
+
+def test_cli_install_compat_check_skips_when_bundle_missing(monkeypatch, tmp_path, mock_root):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+    monkeypatch.setattr(
+        "calculinux_update.cli.extract_bundle_extras",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+
+    result = runner.invoke(app, ["install", "--bundle", "bundle", "--dry-run"])
+    assert result.exit_code == 0
+
+
+def test_cli_install_runs_compat_check_and_allows_force(monkeypatch, tmp_path, mock_root):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
+
+    # Fake bundle extras and compat report
+    class FakeExtras:
+        version_manifest = tmp_path / "bundle-manifest.env"
+
+        def cleanup(self):
+            return None
+
+    fake_extras = FakeExtras()
+
+    monkeypatch.setattr("calculinux_update.cli.extract_bundle_extras", lambda *_a, **_k: fake_extras)
+    monkeypatch.setattr("calculinux_update.cli.load_version_manifest", lambda *_a, **_k: {"CALCULINUX_VERSION": "1.0.0"})
+
+    class FakeIssue:
+        level = type("L", (), {"name": "MINOR_ISSUES"})()
+        category = "feeds"
+        message = "Codename changed"
+        recommendation = None
+
+    class FakeReport:
+        overall_level = CompatLevel.MAJOR_ISSUES
+        issues = [FakeIssue()]
+
+    monkeypatch.setattr("calculinux_update.cli.check_compatibility", lambda *_a, **_k: FakeReport())
+
+    # Pretend current manifest exists
+    from pathlib import Path as RealPath
+
+    orig_exists = RealPath.exists
+
+    def exists_side_effect(self):
+        if str(self) == "/var/lib/calculinux/version-manifest.env":
+            return True
+        return orig_exists(self)
+
+    with patch.object(RealPath, "exists", exists_side_effect):
+        result = runner.invoke(app, ["install", "--bundle", "bundle", "--dry-run", "--force"])
+
     assert result.exit_code == 0
 
 

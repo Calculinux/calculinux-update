@@ -28,6 +28,8 @@ def test_compute_reconcile_plan(tmp_path):
     assert plan.status_only_duplicates == []
     assert plan.reinstall == ["missing"]
     assert plan.upgrade == ["base", "overlay"]
+    assert plan.broken_abi == []
+    assert plan.missing_deps == []
 
 
 def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):
@@ -53,6 +55,8 @@ def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):
     # Packages without files in upper go to status_only_duplicates (safe status pruning)
     assert plan.status_only_duplicates == ["pkg-without-files"]
     assert plan.reinstall == []
+    assert plan.broken_abi == []
+    assert plan.missing_deps == []
     assert sorted(plan.upgrade) == [
         "local-only",
         "pkg-also-with",
@@ -74,6 +78,8 @@ def test_compute_reconcile_plan_all_status_only(tmp_path):
 
     assert plan.duplicates == []
     assert sorted(plan.status_only_duplicates) == ["pkg1", "pkg2"]
+    assert plan.broken_abi == []
+    assert plan.missing_deps == []
     assert sorted(plan.upgrade) == ["local", "pkg1", "pkg2"]
 
 
@@ -83,3 +89,26 @@ def test_prune_writable_status(tmp_path):
     changed = reconcile.prune_writable_status(writable, ["drop"])
     assert changed
     assert "drop" not in writable.read_text()
+
+
+def test_check_abi_compatibility_detects_missing_deps(tmp_path, monkeypatch):
+    image_status = tmp_path / "image"
+    write_status(image_status, ["libfoo"])
+
+    calls = {"info": 0, "status": 0}
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] == ["opkg", "info"]:
+            calls["info"] += 1
+            # pkg depends on libfoo (present) and libmissing (absent)
+            return type("R", (), {"returncode": 0, "stdout": "Depends: libfoo, libmissing\n"})()
+        if cmd[:3] == ["opkg", "status", "--writable-only"]:
+            calls["status"] += 1
+            return type("R", (), {"returncode": 1, "stdout": ""})()
+        raise AssertionError(f"unexpected cmd: {cmd}")
+
+    monkeypatch.setattr(reconcile.subprocess, "run", fake_run)
+    broken, missing = reconcile.check_abi_compatibility(["mypkg"], image_status)
+    assert broken == ["mypkg"]
+    assert missing == ["mypkg -> libmissing"]
+    assert calls["info"] == 1

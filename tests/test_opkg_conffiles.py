@@ -162,71 +162,28 @@ class TestDetectModifiedConffiles:
 
     def test_detect_modified_conffiles(self, tmp_path):
         """Test detecting modified config files."""
-        # Setup filesystem structure
-        info_dir = tmp_path / "info"
-        info_dir.mkdir()
-        (info_dir / "test-pkg.conffiles").write_text("/etc/test.conf\\n")
-        
-        # Create actual config file
-        etc_dir = tmp_path / "etc"
-        etc_dir.mkdir()
-        config_file = etc_dir / "test.conf"
-        config_file.write_text("modified content")
-        
-        # Create overlay structure
         overlay_dir = tmp_path / "overlay"
-        overlay_etc = overlay_dir / "etc"
-        (overlay_etc / "upper").mkdir(parents=True)
-        (overlay_etc / "lower").mkdir(parents=True)
-        
-        # Upper has modified version
-        upper_file = overlay_etc / "upper" / "test.conf"
-        upper_file.write_text("modified content")
-        
-        # Lower has original version
-        lower_file = overlay_etc / "lower" / "test.conf"
-        lower_file.write_text("original content")
-        
+        (overlay_dir / "etc/upper").mkdir(parents=True)
+        (overlay_dir / "etc/lower").mkdir(parents=True)
+        (overlay_dir / "etc/upper/test.conf").write_text("modified content")
+        (overlay_dir / "etc/lower/test.conf").write_text("original content")
+
+        # The merged-view file only needs to \"exist\" for the detector to proceed.
+        # We avoid touching the real /etc by mocking Path.exists for that one path.
         with patch("calculinux_update.opkg.conffiles.get_all_conffiles") as mock_get_all:
             mock_get_all.return_value = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
-            with patch("pathlib.Path.exists") as mock_exists:
-                # Config file exists
-                def exists_side_effect(self):
-                    if str(self) == "/etc/test.conf":
-                        return True
-                    return Path.exists(self)
-                mock_exists.side_effect = lambda: True
-                
-                with patch("calculinux_update.opkg.conffiles.Path") as mock_path_cls:
-                    # Mock Path to return our test paths
-                    def path_init(p):
-                        if p == "/etc/test.conf":
-                            mock_p = Mock()
-                            mock_p.exists.return_value = True
-                            mock_p.parent = Mock()
-                            mock_p.name = "test.conf"
-                            return mock_p
-                        return Path(p)
-                    
-                    mock_path_cls.side_effect = path_init
-                    
-                    with patch("calculinux_update.opkg.conffiles._compute_md5") as mock_md5:
-                        # Different checksums indicate modification
-                        def md5_side_effect(path):
-                            if "upper" in str(path):
-                                return "modified_checksum"
-                            elif "lower" in str(path):
-                                return "original_checksum"
-                            return None
-                        mock_md5.side_effect = md5_side_effect
-                        
-                        modified = detect_modified_conffiles(
-                            ["test-pkg"],
-                            str(overlay_dir)
-                        )
-                        
-                        assert len(modified) == 1
-                        assert modified[0].path == "/etc/test.conf"
+            orig_exists = Path.exists
+
+            def exists_side_effect(self):
+                if str(self) == "/etc/test.conf":
+                    return True
+                return orig_exists(self)
+
+            with patch.object(Path, "exists", exists_side_effect):
+                modified = detect_modified_conffiles(["test-pkg"], str(overlay_dir))
+
+        assert len(modified) == 1
+        assert modified[0].path == "/etc/test.conf"
 
     def test_detect_no_modifications(self, tmp_path):
         """Test when no config files are modified."""

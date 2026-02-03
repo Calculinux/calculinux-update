@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -19,6 +20,7 @@ from .opkg.reconcile import (
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
 from .opkg.conffiles import detect_modified_conffiles, create_dpkg_new_files
+from .version_compat import check_compatibility, load_version_manifest, UpgradeType
 
 LOG = logging.getLogger("calculinux_update.hooks")
 LOG.setLevel(logging.INFO)
@@ -29,6 +31,7 @@ LOG.addHandler(handler)
 # OPKG file locations
 WRITABLE_STATUS = Path("/var/lib/opkg/status")
 CURRENT_IMAGE_STATUS = Path("/var/lib/opkg/status.image")
+CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
 
 # State directory for calculinux-update
 STATE_DIR = Path("/var/lib/calculinux-update")
@@ -44,9 +47,40 @@ PRE_UPDATE_SLOT_NAME = STATE_DIR / "update-state.pre-update-slot"
 UPDATED_SLOT_NAME = STATE_DIR / "update-state.updated-slot"
 UPDATE_BOOT_ID = STATE_DIR / "update-state.boot-id"
 STATUS_PRUNED_MARKER = STATE_DIR / "status-pruned"
+def _reconcile_state_file() -> Path:
+    return STATE_DIR / "reconcile-state"
 
 # Cache directory
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
+
+
+class ReconcileState(Enum):
+    NONE = "none"
+    STARTED = "started"
+    OPKG_UPDATED = "opkg_updated"
+    DUPLICATES_REMOVING = "duplicates_removing"
+    REINSTALL_IN_PROGRESS = "reinstall_in_progress"
+    UPGRADE_IN_PROGRESS = "upgrade_in_progress"
+    COMPLETE = "complete"
+
+
+def _save_reconcile_state(state: ReconcileState) -> None:
+    _ensure_state_dir()
+    _atomic_write(_reconcile_state_file(), state.value + "\n")
+
+
+def _load_reconcile_state() -> ReconcileState:
+    path = _reconcile_state_file()
+    if not path.exists():
+        return ReconcileState.NONE
+    try:
+        return ReconcileState(path.read_text().strip())
+    except (OSError, ValueError):
+        return ReconcileState.NONE
+
+
+def _clear_reconcile_state() -> None:
+    _reconcile_state_file().unlink(missing_ok=True)
 
 
 @contextmanager
@@ -366,6 +400,29 @@ def run_slot_hook(hook: str, slot: str) -> None:
         LOG.warning("writable status %s missing", WRITABLE_STATUS)
         return
 
+    # Version compatibility reporting (best effort)
+    bundle_mount = os.environ.get("RAUC_BUNDLE_MOUNT_POINT")
+    bundle_manifest = (
+        Path(bundle_mount) / "extras/version-manifest.env" if bundle_mount else None
+    )
+    if CURRENT_VERSION_MANIFEST.exists() and bundle_manifest and bundle_manifest.exists():
+        old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+        new_manifest = load_version_manifest(bundle_manifest)
+        if old_manifest and new_manifest:
+            report = check_compatibility(old_manifest, new_manifest)
+            LOG.info(
+                "Version upgrade: %s -> %s (%s)",
+                old_manifest.get("CALCULINUX_VERSION", "unknown"),
+                new_manifest.get("CALCULINUX_VERSION", "unknown"),
+                report.upgrade_type.value,
+            )
+            for issue in report.issues:
+                LOG.info("[%s] %s: %s", issue.level.name, issue.category, issue.message)
+                if issue.recommendation:
+                    LOG.info("  -> %s", issue.recommendation)
+            if report.upgrade_type == UpgradeType.MAJOR:
+                LOG.info("Major upgrade detected; extra ABI/feed handling may be required.")
+
     # Save pre-update state for rollback detection
     _save_pre_update_state(slot)
 
@@ -438,12 +495,19 @@ def postreboot_entrypoint() -> None:
 
     # Use locking to prevent concurrent operations
     with _state_lock():
+        # Record state so interrupted boots can resume safely.
+        # Pending-files are the source of truth; state is for observability.
+        current_state = _load_reconcile_state()
+        if current_state not in (ReconcileState.NONE, ReconcileState.COMPLETE):
+            LOG.info("resuming reconciliation from state: %s", current_state.value)
+
         # Check for rollback first
         rollback_info = _detect_rollback()
         if rollback_info["is_rollback"]:
             LOG.info("rollback detected: %s", rollback_info["reason"])
             if _handle_rollback():
                 LOG.info("rollback handling complete")
+                _clear_reconcile_state()
                 return
             else:
                 LOG.error("rollback handling failed")
@@ -462,14 +526,20 @@ def postreboot_entrypoint() -> None:
             LOG.info("no pending operations")
             return
 
+        _save_reconcile_state(ReconcileState.STARTED)
+
         if not _run_opkg(["update"]):
             LOG.error("opkg update failed; will retry next boot")
             raise SystemExit(1)
+        _save_reconcile_state(ReconcileState.OPKG_UPDATED)
 
         # Phase 2: Remove physical duplicates (packages with files in upper layer)
         # This must happen after reboot when we're running from the new base image
+        _save_reconcile_state(ReconcileState.DUPLICATES_REMOVING)
         duplicates_status = _process_pending(PENDING_DUPLICATES_FILE, _remove_duplicate_pkg)
+        _save_reconcile_state(ReconcileState.REINSTALL_IN_PROGRESS)
         reinstall_status = _process_pending(PENDING_REINSTALL_FILE, _install_reinstall_pkg)
+        _save_reconcile_state(ReconcileState.UPGRADE_IN_PROGRESS)
         upgrade_status = _process_pending(PENDING_UPGRADE_FILE, _upgrade_pkg)
 
         if duplicates_status and reinstall_status and upgrade_status:
@@ -490,6 +560,8 @@ def postreboot_entrypoint() -> None:
             # Clean up state files except boot ID (kept to prevent re-processing)
             for path in [PRE_UPDATE_WRITABLE_STATUS, PRE_UPDATE_SLOT_NAME, UPDATED_SLOT_NAME, MODIFIED_CONFFILES_FILE]:
                 path.unlink(missing_ok=True)
+            _save_reconcile_state(ReconcileState.COMPLETE)
+            _clear_reconcile_state()
         else:
             LOG.error("post-reboot reconciliation incomplete; will retry")
             raise SystemExit(1)

@@ -16,6 +16,8 @@ from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
 from .prefetch import PrefetchError, prefetch_for_bundle
+from .bundle import BundleExtractionError, extract_bundle_extras
+from .version_compat import CompatLevel, check_compatibility, load_version_manifest
 
 app = typer.Typer(help="Calculinux RAUC update helper")
 console = Console()
@@ -358,6 +360,11 @@ def install(
         "--prefetch/--no-prefetch",
         help="Download post-reboot packages ahead of time",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Skip compatibility checks (not recommended)",
+    ),
 ):
     """Download and install a bundle via RAUC."""
 
@@ -383,6 +390,51 @@ def install(
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
+
+    # Compatibility check (best-effort) using version manifests in bundle extras
+    try:
+        extras = extract_bundle_extras(result.path)
+    except (FileNotFoundError, BundleExtractionError) as exc:
+        extras = None
+        console.print(f"[yellow]Compatibility check skipped:[/] {exc}")
+
+    if extras and extras.version_manifest:
+        current_manifest_path = Path("/var/lib/calculinux/version-manifest.env")
+        if current_manifest_path.exists():
+            old_manifest = load_version_manifest(current_manifest_path)
+            new_manifest = load_version_manifest(extras.version_manifest)
+            report = check_compatibility(old_manifest, new_manifest)
+
+            if report.issues:
+                console.print("[cyan]Compatibility analysis:[/]", highlight=False)
+                for issue in report.issues:
+                    console.print(
+                        f" - [{issue.level.name}] {issue.category}: {issue.message}",
+                        highlight=False,
+                    )
+                    if issue.recommendation:
+                        console.print(f"   -> {issue.recommendation}", highlight=False)
+
+            if report.overall_level == CompatLevel.INCOMPATIBLE and not force:
+                console.print("[red]Compatibility check failed.[/]", highlight=False)
+                console.print(
+                    "Re-run with --force to install anyway (not recommended).",
+                    highlight=False,
+                )
+                extras.cleanup()
+                raise typer.Exit(1)
+
+            if (
+                report.overall_level in (CompatLevel.MAJOR_ISSUES, CompatLevel.MINOR_ISSUES)
+                and not (force or assume_yes)
+            ):
+                # Add an extra confirmation step before the normal confirmation below.
+                if not typer.confirm("Proceed with installation despite warnings?", default=False):
+                    console.print("[yellow]Installation skipped[/]")
+                    extras.cleanup()
+                    raise typer.Exit()
+
+        extras.cleanup()
 
     confirm = True if assume_yes else typer.confirm(
         "Proceed with rauc install?",

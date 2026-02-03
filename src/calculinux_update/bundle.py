@@ -13,6 +13,7 @@ from typing import Optional
 __all__ = ["BundleExtras", "extract_bundle_extras"]
 
 EXTRAS_DIR = Path("extras/opkg")
+VERSION_MANIFEST = Path("extras/version-manifest.env")
 
 
 @dataclass(slots=True)
@@ -20,6 +21,7 @@ class BundleExtras:
     root: Path
     opkg_root: Path
     image_status: Path
+    version_manifest: Optional[Path] = None
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -90,4 +92,13 @@ def extract_bundle_extras(bundle_path: Path) -> Optional[BundleExtras]:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
 
-    return BundleExtras(root=temp_dir, opkg_root=opkg_path, image_status=image_status)
+    version_manifest = temp_dir / VERSION_MANIFEST
+    if not version_manifest.exists():
+        version_manifest = None
+
+    return BundleExtras(
+        root=temp_dir,
+        opkg_root=opkg_path,
+        image_status=image_status,
+        version_manifest=version_manifest,
+    )

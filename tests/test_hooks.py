@@ -84,7 +84,9 @@ def test_run_slot_hook(monkeypatch, tmp_path):
         duplicates=["base"],
         status_only_duplicates=["status-only"],
         reinstall=["foo"],
-        upgrade=["bar"]
+        upgrade=["bar"],
+        broken_abi=[],
+        missing_deps=[],
     )
     monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
 
@@ -107,6 +109,53 @@ def test_run_slot_hook(monkeypatch, tmp_path):
     assert recorded["duplicate removal"] == ["base"]
     assert recorded["reinstall"] == ["foo"]
     assert recorded["upgrade"] == ["bar"]
+
+
+def test_run_slot_hook_logs_compat_report(monkeypatch, tmp_path, caplog):
+    caplog.set_level("INFO", logger="calculinux_update.hooks")
+
+    writable = tmp_path / "status"
+    writable.write_text("Package: overlay\n\n")
+    monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable)
+
+    current = tmp_path / "current"
+    current.write_text("Package: current\n\n")
+    monkeypatch.setattr(hooks, "CURRENT_IMAGE_STATUS", current)
+
+    # Mock state directory and files for rollback tracking to avoid writing /var
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
+    monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", state_dir / "updated-slot")
+    monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", state_dir / "pre-update-slot")
+    monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-update-writable")
+    monkeypatch.setattr(hooks, "PENDING_DUPLICATES_FILE", state_dir / "pending-duplicates")
+    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "pending-reinstalls")
+    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "pending-upgrades")
+    monkeypatch.setattr(hooks, "STATUS_PRUNED_MARKER", state_dir / "status-pruned")
+
+    # Provide manifests
+    cur_manifest = tmp_path / "version-manifest.env"
+    cur_manifest.write_text('CALCULINUX_VERSION="1.0.0"\n')
+    monkeypatch.setattr(hooks, "CURRENT_VERSION_MANIFEST", cur_manifest)
+
+    bundle_mount = tmp_path / "bundle"
+    (bundle_mount / "extras").mkdir(parents=True)
+    (bundle_mount / "extras/version-manifest.env").write_text('CALCULINUX_VERSION="2.0.0"\n')
+    monkeypatch.setenv("RAUC_BUNDLE_MOUNT_POINT", str(bundle_mount))
+
+    # Minimal required bundle status image env
+    bundle_status = tmp_path / "status.image"
+    bundle_status.write_text("Package: base\n\n")
+    monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
+    monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status))
+
+    plan = ReconcilePlan(duplicates=[], status_only_duplicates=[], reinstall=[], upgrade=[], broken_abi=[], missing_deps=[])
+    monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
+    monkeypatch.setattr(hooks, "prune_writable_status", lambda *_: False)
+
+    hooks.run_slot_hook("slot-post-install", "rootfs.0")
+    assert "Version upgrade" in caplog.text
 
 
 def test_run_slot_hook_non_post_install(monkeypatch):
@@ -584,6 +633,15 @@ def test_state_lock_prevents_concurrent_access(tmp_path, monkeypatch):
     # Just verify the lock file gets created and the context manager works
     with hooks._state_lock():
         assert lock_file.exists()
+
+
+def test_reconcile_state_file_respects_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
+    # Save/load should use STATE_DIR dynamically
+    hooks._save_reconcile_state(hooks.ReconcileState.STARTED)
+    assert hooks._load_reconcile_state() == hooks.ReconcileState.STARTED
+    hooks._clear_reconcile_state()
+    assert hooks._load_reconcile_state() == hooks.ReconcileState.NONE
 
 
 def test_detect_rollback_cleans_up_on_boot_id_match(tmp_path, monkeypatch):

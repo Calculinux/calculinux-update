@@ -23,11 +23,13 @@ NOTE: The ioctl automatically invalidates dentries, so no remount is needed.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import fcntl
 import logging
 import struct
 import subprocess
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import List
@@ -75,8 +77,52 @@ def find_overlay_mount_point(path: str) -> str:
         LOGGER.warning(f"Failed to parse mountinfo: {e}")
     return best_match if best_match else "/"
 
-OVL_IOC_RESTORE_LOWER = 0x400C4F01  # _IOW('O', 1, ...)
-OVL_IOC_IS_RESTORABLE = 0x800C4F02  # _IOR('O', 2, ...)
+# ioctl encoding (matches kernel _IOW macro)
+_IOC_NONE = 0
+_IOC_WRITE = 1
+
+_IOC_NRBITS = 8
+_IOC_TYPEBITS = 8
+_IOC_SIZEBITS = 14
+_IOC_DIRBITS = 2
+
+_IOC_NRSHIFT = 0
+_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS
+_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS
+_IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS
+
+
+def _IOW(type_char: str, nr: int, size: int) -> int:
+    """Compute ioctl number (write) compatible with kernel _IOW."""
+    return (
+        (_IOC_WRITE << _IOC_DIRSHIFT)
+        | (ord(type_char) << _IOC_TYPESHIFT)
+        | (nr << _IOC_NRSHIFT)
+        | (size << _IOC_SIZESHIFT)
+    )
+
+
+# struct ovl_restore_lower_args: aligned_u64 (8) + u32 (4) + u32 (4) = 16 bytes
+OVL_IOC_RESTORE_LOWER = _IOW("O", 1, 16)
+OVL_IOC_IS_RESTORABLE = _IOW("O", 2, 16)
+
+
+def _validate_ioctl_struct_size() -> None:
+    """Validate that struct packing matches kernel expectations."""
+    test_ptr = 0x12345678 if sys.maxsize <= 2**32 else 0x123456789ABCDEF0
+    test_args = struct.pack("QII", test_ptr, 100, 0)
+    if len(test_args) != 16:
+        raise RuntimeError(
+            f"ioctl struct size mismatch: expected 16 bytes, got {len(test_args)}. "
+            f"Architecture: {'32-bit' if sys.maxsize <= 2**32 else '64-bit'}"
+        )
+    LOGGER.debug(
+        "ioctl struct validation passed (16 bytes on %s)",
+        "32-bit" if sys.maxsize <= 2**32 else "64-bit",
+    )
+
+
+_validate_ioctl_struct_size()
 
 def check_file_restorability(mount_point: str, path: str) -> FileRestorability:
     """
@@ -96,8 +142,12 @@ def check_file_restorability(mount_point: str, path: str) -> FileRestorability:
     """
     try:
         with open(mount_point, 'r') as f:
-            path_bytes = path.encode('utf-8')
-            args = struct.pack('QII', id(path_bytes), len(path_bytes), 0)
+            # Encode with null terminator, but report strlen (without terminator)
+            path_bytes = path.encode("utf-8") + b"\0"
+            buf = ctypes.create_string_buffer(path_bytes)
+            path_ptr = ctypes.addressof(buf)
+            path_len = len(path.encode("utf-8"))
+            args = struct.pack("QII", path_ptr, path_len, 0)
             fcntl.ioctl(f.fileno(), OVL_IOC_IS_RESTORABLE, args)
         return FileRestorability.WHITEOUT
     except OSError as e:
@@ -123,9 +173,11 @@ def restore_lower_via_ioctl(mount_point: str, path: str) -> bool:
     """
     try:
         with open(mount_point, 'r') as f:
-            path_bytes = path.encode('utf-8')
-            # Use id(path_bytes) for pointer, but this is only valid for the duration of the call
-            args = struct.pack('QII', id(path_bytes), len(path_bytes), 0)
+            path_bytes = path.encode("utf-8") + b"\0"
+            buf = ctypes.create_string_buffer(path_bytes)
+            path_ptr = ctypes.addressof(buf)
+            path_len = len(path.encode("utf-8"))
+            args = struct.pack("QII", path_ptr, path_len, 0)
             fcntl.ioctl(f.fileno(), OVL_IOC_RESTORE_LOWER, args)
         return True
     except OSError as e:
