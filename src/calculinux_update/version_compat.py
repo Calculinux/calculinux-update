@@ -144,4 +144,3 @@ def check_compatibility(old: Dict[str, str], new: Dict[str, str]) -> Compatibili
 
     overall = max((i.level for i in issues), default=CompatLevel.COMPATIBLE)
     return CompatibilityReport(upgrade_type=upgrade_type, overall_level=overall, issues=issues)
-

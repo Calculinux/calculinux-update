@@ -20,4 +20,3 @@ def test_arm32_pointer_size_when_running_arm32():
     if sys.maxsize > 2**32:
         return
     assert ctypes.sizeof(ctypes.c_void_p) == 4
-

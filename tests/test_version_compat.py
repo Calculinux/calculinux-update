@@ -36,4 +36,3 @@ def test_check_compatibility_detects_major_kernel():
     assert r.upgrade_type == UpgradeType.MAJOR
     assert any(i.category == "kernel" for i in r.issues)
     assert r.overall_level in (CompatLevel.MAJOR_ISSUES, CompatLevel.INCOMPATIBLE)
-
