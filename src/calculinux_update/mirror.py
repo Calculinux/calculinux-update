@@ -69,17 +69,24 @@ class MirrorClient:
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 return None
+            status = exc.response.status_code if exc.response is not None else "unknown"
             LOGGER.debug("Index fetch failed for %s: %s", index_url, exc)
-            return None
+            raise RuntimeError(
+                f"Index fetch failed for {index_url} (HTTP {status})"
+            ) from exc
         except httpx.HTTPError as exc:  # pragma: no cover - network errors
             LOGGER.debug("Index fetch error for %s: %s", index_url, exc)
-            return None
+            raise RuntimeError(
+                f"Index fetch error for {index_url}: {exc}"
+            ) from exc
 
         try:
             data = response.json()
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             LOGGER.warning("Invalid JSON received from %s", index_url)
-            return None
+            raise RuntimeError(
+                f"Invalid JSON received from {index_url}"
+            ) from exc
 
         artifacts = data.get("artifacts", {}).get("rauc", [])
         bundles: List[BundleInfo] = []
