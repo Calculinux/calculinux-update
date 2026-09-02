@@ -45,6 +45,10 @@ def prefetch_for_bundle(
 
     if not extras:
         return PrefetchResult(skipped=True, reason="bundle extras missing")
+    image_status = getattr(extras, "image_status", None)
+    if image_status is None or not Path(image_status).exists():
+        extras.cleanup()
+        return PrefetchResult(skipped=True, reason="bundle status.image missing")
 
     try:
         return _prefetch_with_extras(extras, bundle_sha256, console)
