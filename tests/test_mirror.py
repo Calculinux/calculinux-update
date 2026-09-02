@@ -78,6 +78,35 @@ def test_list_bundles_uses_index_json_and_sorts(monkeypatch, cfg):
     assert bundles[1].last_modified is None
 
 
+def test_list_bundles_reads_min_version_from_index(monkeypatch, cfg):
+    index_payload = {
+        "distro_version": "2.0.0",
+        "min_calculinux_version": "1.0.0-continuous+abc",
+        "min_build_timestamp": "2026-09-01T00:00:00Z",
+        "artifacts": {
+            "rauc": [
+                {
+                    "name": "wrynose.raucb",
+                    "sha256": "abc123",
+                    "size": 1,
+                    "build_timestamp": "2026-10-01T00:00:00Z",
+                }
+            ]
+        },
+    }
+    index_url = "https://example.com/update/test/index.json"
+    stub_client = StubClient({index_url: StubResponse(json_data=index_payload)})
+    monkeypatch.setattr("calculinux_update.mirror.httpx.Client", lambda *_, **__: stub_client)
+
+    with MirrorClient(cfg) as client:
+        bundles = client.list_bundles()
+
+    assert bundles[0].calculinux_version == "2.0.0"
+    assert bundles[0].min_calculinux_version == "1.0.0-continuous+abc"
+    assert bundles[0].min_build_timestamp == "2026-09-01T00:00:00Z"
+    assert bundles[0].build_timestamp == "2026-10-01T00:00:00Z"
+
+
 def test_list_bundles_skips_bundles_without_sha256(monkeypatch, cfg):
     index_payload = {
         "artifacts": {

@@ -25,6 +25,10 @@ class BundleInfo:
     last_modified: Optional[datetime] = None
     sha256: Optional[str] = None
     machine: Optional[str] = None
+    calculinux_version: Optional[str] = None
+    min_calculinux_version: Optional[str] = None
+    min_build_timestamp: Optional[str] = None
+    build_timestamp: Optional[str] = None
 
 
 class MirrorClient:
@@ -116,9 +120,28 @@ class MirrorClient:
                     last_modified=_parse_iso(entry.get("last_modified")),
                     sha256=sha256,
                     machine=bundle_machine,
+                    calculinux_version=_index_str(
+                        entry, data, "calculinux_version", "distro_version"
+                    ),
+                    min_calculinux_version=_index_str(
+                        entry, data, "min_calculinux_version"
+                    ),
+                    min_build_timestamp=_index_str(
+                        entry, data, "min_build_timestamp"
+                    ),
+                    build_timestamp=_index_str(entry, data, "build_timestamp"),
                 )
             )
         return bundles
+
+
+def _index_str(entry: dict, index: dict, *keys: str) -> Optional[str]:
+    for key in keys:
+        for source in (entry, index):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
