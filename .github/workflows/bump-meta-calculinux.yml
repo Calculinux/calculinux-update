@@ -1,0 +1,83 @@
+name: Bump meta-calculinux recipe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bump:
+    if: github.repository == 'Calculinux/calculinux-update'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout calculinux-update
+        uses: actions/checkout@v4
+
+      - name: Require META_CALCULINUX_TOKEN
+        env:
+          TOKEN: ${{ secrets.META_CALCULINUX_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Set repository secret META_CALCULINUX_TOKEN (a PAT with contents:write and pull-requests:write on Calculinux/meta-calculinux)."
+            exit 1
+          fi
+
+      - name: Read package version
+        id: pkg
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "license_md5=$(md5sum LICENSE | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout meta-calculinux
+        uses: actions/checkout@v4
+        with:
+          repository: Calculinux/meta-calculinux
+          token: ${{ secrets.META_CALCULINUX_TOKEN }}
+          path: meta-calculinux
+
+      - name: Update recipe
+        id: update
+        working-directory: meta-calculinux
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          REV: ${{ github.sha }}
+          LICENSE_MD5: ${{ steps.pkg.outputs.license_md5 }}
+          USE_GIT_MV: "1"
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/bump_meta_recipe.sh" --apply
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update pull request
+        if: steps.update.outputs.changed == 'true'
+        working-directory: meta-calculinux
+        env:
+          GH_TOKEN: ${{ secrets.META_CALCULINUX_TOKEN }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          REV: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B bump/calculinux-update
+          git add -A meta-calculinux-distro/recipes-core/calculinux-update
+          git commit -m "Bump calculinux-update to ${VERSION}."
+          git push --force origin bump/calculinux-update
+
+          body="Update the bitbake recipe to calculinux-update ${VERSION} (SRCREV \`${REV}\`).
+
+Opened automatically after a merge to Calculinux/calculinux-update@main."
+          existing="$(gh pr list --repo Calculinux/meta-calculinux --head bump/calculinux-update --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "Bump calculinux-update to ${VERSION}" --body "$body"
+          else
+            gh pr create --repo Calculinux/meta-calculinux \
+              --base main --head bump/calculinux-update \
+              --title "Bump calculinux-update to ${VERSION}" \
+              --body "$body"
+          fi

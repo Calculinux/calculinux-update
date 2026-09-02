@@ -19,6 +19,9 @@ jobs:
       - name: Check version-bump script
         run: python3 scripts/check_version_bump.py --self-check
 
+      - name: Check meta-recipe bump script
+        run: bash scripts/bump_meta_recipe.sh --self-check
+
       - name: Require version bump when src/ changes
         if: github.event_name == 'pull_request'
         env:
