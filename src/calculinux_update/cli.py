@@ -12,13 +12,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
 from .prefetch import PrefetchError, prefetch_for_bundle
+from .version_compat import check_compatibility, load_version_manifest
 
 app = typer.Typer(help="Calculinux RAUC update helper")
 console = Console()
+
+
+CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
 
 
 def _require_root(operation: str) -> None:
@@ -31,6 +36,32 @@ def _require_root(operation: str) -> None:
 
 def _load_config(config_path: Optional[Path]) -> UpdateConfig:
     return load_config(config_path)
+
+
+def _enforce_min_version(extras: BundleExtras, *, force: bool) -> None:
+    if extras.version_manifest is None:
+        return
+    if not CURRENT_VERSION_MANIFEST.exists():
+        return
+    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+    new_manifest = load_version_manifest(extras.version_manifest)
+    if not old_manifest or not new_manifest:
+        return
+    report = check_compatibility(old_manifest, new_manifest)
+    for issue in report.issues:
+        console.print(
+            f" - [{issue.level.name}] {issue.category}: {issue.message}",
+            highlight=False,
+        )
+        if issue.recommendation:
+            console.print(f"   -> {issue.recommendation}", highlight=False)
+    if report.any_blockers() and not force:
+        console.print("[red]Compatibility check failed.[/]", highlight=False)
+        console.print(
+            "Install the required release first, or re-run with --force.",
+            highlight=False,
+        )
+        raise typer.Exit(1)
 
 
 def _display_bundles(bundles: List[BundleInfo], show_index: bool = False) -> None:
@@ -358,6 +389,11 @@ def install(
         "--prefetch/--no-prefetch",
         help="Download post-reboot packages ahead of time",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Skip minimum-version check (not recommended)",
+    ),
 ):
     """Download and install a bundle via RAUC."""
 
@@ -383,6 +419,17 @@ def install(
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
+
+    extras = None
+    try:
+        extras = extract_bundle_extras(result.path)
+    except (FileNotFoundError, BundleExtractionError) as exc:
+        console.print(f"[yellow]Compatibility check skipped:[/] {exc}")
+    if extras is not None:
+        try:
+            _enforce_min_version(extras, force=force)
+        finally:
+            extras.cleanup()
 
     confirm = True if assume_yes else typer.confirm(
         "Proceed with rauc install?",

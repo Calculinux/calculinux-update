@@ -19,6 +19,7 @@ from .opkg.reconcile import (
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
 from .opkg.conffiles import detect_modified_conffiles, create_dpkg_new_files
+from .version_compat import check_compatibility, load_version_manifest
 
 LOG = logging.getLogger("calculinux_update.hooks")
 LOG.setLevel(logging.INFO)
@@ -29,6 +30,7 @@ LOG.addHandler(handler)
 # OPKG file locations
 WRITABLE_STATUS = Path("/var/lib/opkg/status")
 CURRENT_IMAGE_STATUS = Path("/var/lib/opkg/status.image")
+CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
 
 # State directory for calculinux-update
 STATE_DIR = Path("/var/lib/calculinux-update")
@@ -365,6 +367,26 @@ def run_slot_hook(hook: str, slot: str) -> None:
     if not WRITABLE_STATUS.exists():
         LOG.warning("writable status %s missing", WRITABLE_STATUS)
         return
+
+    bundle_mount = os.environ.get("RAUC_BUNDLE_MOUNT_POINT")
+    bundle_manifest = (
+        Path(bundle_mount) / "extras/version-manifest.env" if bundle_mount else None
+    )
+    if CURRENT_VERSION_MANIFEST.exists() and bundle_manifest and bundle_manifest.exists():
+        try:
+            old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+            new_manifest = load_version_manifest(bundle_manifest)
+            if old_manifest and new_manifest:
+                report = check_compatibility(old_manifest, new_manifest)
+                for issue in report.issues:
+                    LOG.info("[%s] %s: %s", issue.level.name, issue.category, issue.message)
+                    if issue.recommendation:
+                        LOG.info("  -> %s", issue.recommendation)
+                if report.any_blockers():
+                    LOG.error("update blocked by compatibility check")
+                    raise SystemExit(1)
+        except Exception as e:
+            LOG.warning("version compatibility check failed: %s", e)
 
     # Save pre-update state for rollback detection
     _save_pre_update_state(slot)
