@@ -12,7 +12,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
@@ -56,30 +55,17 @@ def _report_compat_issues(old_manifest: Dict[str, str], new_manifest: Dict[str, 
         raise typer.Exit(1)
 
 
-def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> bool:
-    """Gate on index.json metadata. True if a minimum was advertised."""
+def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> None:
     minimum = (bundle.min_calculinux_version or "").strip()
     if not minimum:
-        return False
-    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
-    new_manifest = {
-        "CALCULINUX_VERSION": bundle.calculinux_version or "",
-        "MIN_CALCULINUX_VERSION": minimum,
-        "MIN_BUILD_TIMESTAMP": bundle.min_build_timestamp or "",
-    }
-    _report_compat_issues(old_manifest, new_manifest, force=force)
-    return True
-
-
-def _enforce_min_version(extras: BundleExtras, *, force: bool) -> None:
-    if extras.version_manifest is None:
-        return
-    new_manifest = load_version_manifest(extras.version_manifest)
-    if not new_manifest:
         return
     _report_compat_issues(
         load_version_manifest(CURRENT_VERSION_MANIFEST),
-        new_manifest,
+        {
+            "CALCULINUX_VERSION": bundle.calculinux_version or "",
+            "MIN_CALCULINUX_VERSION": minimum,
+            "MIN_BUILD_TIMESTAMP": bundle.min_build_timestamp or "",
+        },
         force=force,
     )
 
@@ -436,22 +422,10 @@ def install(
         bundles = [b for b in bundles if b.channel.name == selected_channel]
 
     bundle = _pick_bundle(bundles, bundle_name)
-    checked_from_index = _enforce_min_from_index(bundle, force=force)
+    _enforce_min_from_index(bundle, force=force)
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
-
-    extras = None
-    if not checked_from_index:
-        try:
-            extras = extract_bundle_extras(result.path)
-        except (FileNotFoundError, BundleExtractionError) as exc:
-            console.print(f"[yellow]Compatibility check skipped:[/] {exc}")
-        if extras is not None:
-            try:
-                _enforce_min_version(extras, force=force)
-            finally:
-                extras.cleanup()
 
     confirm = True if assume_yes else typer.confirm(
         "Proceed with rauc install?",
