@@ -5,14 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
@@ -38,15 +37,9 @@ def _load_config(config_path: Optional[Path]) -> UpdateConfig:
     return load_config(config_path)
 
 
-def _enforce_min_version(extras: BundleExtras, *, force: bool) -> None:
-    if extras.version_manifest is None:
-        return
-    if not CURRENT_VERSION_MANIFEST.exists():
-        return
-    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
-    new_manifest = load_version_manifest(extras.version_manifest)
-    if not old_manifest or not new_manifest:
-        return
+def _report_compat_issues(
+    old_manifest: Dict[str, str], new_manifest: Dict[str, str], *, force: bool
+) -> None:
     report = check_compatibility(old_manifest, new_manifest)
     for issue in report.issues:
         console.print(
@@ -62,6 +55,28 @@ def _enforce_min_version(extras: BundleExtras, *, force: bool) -> None:
             highlight=False,
         )
         raise typer.Exit(1)
+
+
+def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> None:
+    minimum = (bundle.min_calculinux_version or "").strip()
+    if not minimum:
+        return
+    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+    if not old_manifest.get("CALCULINUX_VERSION", "").strip():
+        console.print(
+            "[yellow]Current Calculinux version is unknown; skipping min-version check.[/]",
+            highlight=False,
+        )
+        return
+    _report_compat_issues(
+        old_manifest,
+        {
+            "CALCULINUX_VERSION": bundle.calculinux_version or "",
+            "MIN_CALCULINUX_VERSION": minimum,
+            "MIN_BUILD_TIMESTAMP": bundle.min_build_timestamp or "",
+        },
+        force=force,
+    )
 
 
 def _display_bundles(bundles: List[BundleInfo], show_index: bool = False) -> None:
@@ -416,20 +431,10 @@ def install(
         bundles = [b for b in bundles if b.channel.name == selected_channel]
 
     bundle = _pick_bundle(bundles, bundle_name)
+    _enforce_min_from_index(bundle, force=force)
     installer = UpdateInstaller(config)
     result = installer.download(bundle, expected_sha256=bundle.sha256)
     console.print(f"[green]Downloaded[/] {result.bundle.name} (sha256 {result.sha256})")
-
-    extras = None
-    try:
-        extras = extract_bundle_extras(result.path)
-    except (FileNotFoundError, BundleExtractionError) as exc:
-        console.print(f"[yellow]Compatibility check skipped:[/] {exc}")
-    if extras is not None:
-        try:
-            _enforce_min_version(extras, force=force)
-        finally:
-            extras.cleanup()
 
     confirm = True if assume_yes else typer.confirm(
         "Proceed with rauc install?",
