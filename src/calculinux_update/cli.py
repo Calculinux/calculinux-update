@@ -37,7 +37,9 @@ def _load_config(config_path: Optional[Path]) -> UpdateConfig:
     return load_config(config_path)
 
 
-def _report_compat_issues(old_manifest: Dict[str, str], new_manifest: Dict[str, str], *, force: bool) -> None:
+def _report_compat_issues(
+    old_manifest: Dict[str, str], new_manifest: Dict[str, str], *, force: bool
+) -> None:
     report = check_compatibility(old_manifest, new_manifest)
     for issue in report.issues:
         console.print(
@@ -59,8 +61,15 @@ def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> None:
     minimum = (bundle.min_calculinux_version or "").strip()
     if not minimum:
         return
+    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+    if not old_manifest.get("CALCULINUX_VERSION", "").strip():
+        console.print(
+            "[yellow]Current Calculinux version is unknown; skipping min-version check.[/]",
+            highlight=False,
+        )
+        return
     _report_compat_issues(
-        load_version_manifest(CURRENT_VERSION_MANIFEST),
+        old_manifest,
         {
             "CALCULINUX_VERSION": bundle.calculinux_version or "",
             "MIN_CALCULINUX_VERSION": minimum,

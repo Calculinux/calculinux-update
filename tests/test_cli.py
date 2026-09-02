@@ -75,14 +75,37 @@ def build_config(tmp_path):
     )
 
 
-def build_bundle(config):
-    return BundleInfo(
+def build_bundle(config, **overrides):
+    fields = dict(
         name="bundle.raucb",
         url="https://example.com/bundle.raucb",
         channel=config.channels[0],
         size_bytes=1024,
         last_modified=None,
         sha256="abcd",
+    )
+    fields.update(overrides)
+    return BundleInfo(**fields)
+
+
+def _stub_install(monkeypatch, config, bundle, installer):
+    class InstallerFactory:
+        @staticmethod
+        def ensure_binary_available(*_args, **_kwargs):
+            return None
+
+        def __call__(self, _cfg):
+            return installer
+
+    monkeypatch.setattr("calculinux_update.cli._load_config", lambda *_: config)
+    monkeypatch.setattr("calculinux_update.cli.UpdateInstaller", InstallerFactory())
+    monkeypatch.setattr(
+        "calculinux_update.cli.MirrorClient",
+        lambda cfg: StubMirror(cfg, [bundle]),
+    )
+    monkeypatch.setattr(
+        "calculinux_update.cli.prefetch_for_bundle",
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
     )
 
 
@@ -366,6 +389,46 @@ def test_cli_install_prefetch_failure(monkeypatch, tmp_path, mock_root):
     assert result.exit_code == 0
     assert "Prefetch failed" in result.stdout
 
+
+def test_cli_install_blocks_before_download_when_min_version_unmet(
+    monkeypatch, tmp_path, mock_root
+):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config, min_calculinux_version="2.0.0")
+    installer = StubInstaller(config)
+    _stub_install(monkeypatch, config, bundle, installer)
+    manifest = tmp_path / "version-manifest.env"
+    manifest.write_text('CALCULINUX_VERSION="1.0.0"\n')
+    monkeypatch.setattr("calculinux_update.cli.CURRENT_VERSION_MANIFEST", manifest)
+
+    result = runner.invoke(
+        app, ["install", "--bundle", "bundle", "--dry-run", "--yes"]
+    )
+
+    assert result.exit_code == 1
+    assert installer.download_calls == []
+    assert "Compatibility check failed" in result.stdout
+
+
+def test_cli_install_skips_min_version_when_current_unknown(
+    monkeypatch, tmp_path, mock_root
+):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config, min_calculinux_version="2.0.0")
+    installer = StubInstaller(config)
+    _stub_install(monkeypatch, config, bundle, installer)
+    monkeypatch.setattr(
+        "calculinux_update.cli.CURRENT_VERSION_MANIFEST",
+        tmp_path / "missing-version-manifest.env",
+    )
+
+    result = runner.invoke(
+        app, ["install", "--bundle", "bundle", "--dry-run", "--yes"]
+    )
+
+    assert result.exit_code == 0
+    assert installer.download_calls
+    assert "skipping min-version check" in result.stdout
 
 
 def test_install_requires_root(monkeypatch, tmp_path, mock_non_root):
