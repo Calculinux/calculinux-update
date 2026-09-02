@@ -186,7 +186,10 @@ def check_compatibility(old: Dict[str, str], new: Dict[str, str]) -> Compatibili
                 CompatibilityIssue(
                     level=CompatLevel.MAJOR_ISSUES,
                     category="kernel",
-                    message=f"Kernel major changed: {old['KERNEL_VERSION']} -> {new['KERNEL_VERSION']}",
+                    message=(
+                        f"Kernel major changed: {old['KERNEL_VERSION']} -> "
+                        f"{new['KERNEL_VERSION']}"
+                    ),
                     recommendation="Out-of-tree kernel modules will need rebuild",
                 )
             )
@@ -197,7 +200,10 @@ def check_compatibility(old: Dict[str, str], new: Dict[str, str]) -> Compatibili
                 CompatibilityIssue(
                     level=CompatLevel.MAJOR_ISSUES,
                     category="python",
-                    message=f"Python version changed: {old['PYTHON_VERSION']} -> {new['PYTHON_VERSION']}",
+                    message=(
+                        f"Python version changed: {old['PYTHON_VERSION']} -> "
+                        f"{new['PYTHON_VERSION']}"
+                    ),
                     recommendation="Python packages may need reinstall",
                 )
             )
@@ -208,7 +214,10 @@ def check_compatibility(old: Dict[str, str], new: Dict[str, str]) -> Compatibili
                 CompatibilityIssue(
                     level=CompatLevel.MAJOR_ISSUES,
                     category="abi",
-                    message=f"Yocto release changed: {old['YOCTO_VERSION']} -> {new['YOCTO_VERSION']}",
+                    message=(
+                        f"Yocto release changed: {old['YOCTO_VERSION']} -> "
+                        f"{new['YOCTO_VERSION']}"
+                    ),
                     recommendation="Overlay packages should be upgraded/reinstalled",
                 )
             )
@@ -219,7 +228,10 @@ def check_compatibility(old: Dict[str, str], new: Dict[str, str]) -> Compatibili
                 CompatibilityIssue(
                     level=CompatLevel.MINOR_ISSUES,
                     category="feeds",
-                    message=f"Codename changed: {old['CALCULINUX_CODENAME']} -> {new['CALCULINUX_CODENAME']}",
+                    message=(
+                        f"Codename changed: {old['CALCULINUX_CODENAME']} -> "
+                        f"{new['CALCULINUX_CODENAME']}"
+                    ),
                     recommendation="Package feeds will be updated to new codename",
                 )
             )

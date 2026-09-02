@@ -54,7 +54,6 @@ def find_overlay_mount_point(path: str) -> str:
     Find the overlay mount point for a given file path by parsing /proc/self/mountinfo.
     Returns the mount point as a string, or '/' if not found.
     """
-    import re
     best_match = None
     best_len = -1
     try:
@@ -215,10 +214,10 @@ def find_restorable_files(file_paths: List[str]) -> List[Path]:
 
     for file_path in file_paths:
         path = Path(file_path)
-        
+
         # Find the overlay mount point for this file
         mount_point = find_overlay_mount_point(str(path))
-        
+
         # Check if this file is restorable
         if is_file_restorable(mount_point, str(path)):
             LOGGER.debug(f"Found restorable file: {path} (mount: {mount_point})")
@@ -406,7 +405,7 @@ def has_files_in_upper(package_name: str) -> bool:
 
         try:
             restorability = check_file_restorability(mount_point, str(path))
-            
+
             if restorability == FileRestorability.IN_UPPER:
                 # Real file exists in upper layer
                 LOGGER.debug("Package %s has real file in upper: %s", package_name, path)
