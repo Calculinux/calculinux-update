@@ -131,3 +131,20 @@ def test_check_compatibility_ranks_multiple_issues():
     r = check_compatibility(old, new)
     assert r.overall_level == CompatLevel.MAJOR_ISSUES
     assert {i.category for i in r.issues} >= {"kernel", "python", "abi", "feeds"}
+
+
+def test_unparseable_and_pre_only_versions():
+    assert get_upgrade_type("not-a-version", "1.0.0") == UpgradeType.MAJOR
+    assert get_upgrade_type("1.0.0", "rel 9.0") == UpgradeType.MAJOR
+    assert version_meets_minimum("1.0.0+gdeadbeef", "1.0.0+gdeadbeef")
+    assert version_meets_minimum("1.0.0", "")
+
+
+def test_load_version_manifest_missing_junk_and_unreadable(tmp_path: Path):
+    assert load_version_manifest(tmp_path / "missing.env") == {}
+    p = tmp_path / "manifest.env"
+    p.write_text("NOEQUALS\nKEY=val\n")
+    assert load_version_manifest(p) == {"KEY": "val"}
+    d = tmp_path / "adir"
+    d.mkdir()
+    assert load_version_manifest(d) == {}

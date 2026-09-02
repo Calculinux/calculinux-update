@@ -28,6 +28,7 @@ def test_compute_reconcile_plan(tmp_path):
     assert plan.status_only_duplicates == []
     assert plan.reinstall == ["missing"]
     assert plan.upgrade == ["base", "overlay"]
+    assert plan.any_actions()
 
 
 def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):

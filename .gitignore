@@ -10,6 +10,7 @@ venv/
 .env.local
 .mypy_cache/
 .pytest_cache/
+.coverage
 coverage.xml
 htmlcov/
 .dist/
