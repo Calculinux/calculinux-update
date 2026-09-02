@@ -1,7 +1,5 @@
 """Tests for OverlayFS whiteout cleanup functionality."""
 
-import os
-import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,13 +8,12 @@ import pytest
 
 from calculinux_update.opkg.overlayfs import (
     FileRestorability,
-    restore_opkg_metadata,
-    restore_package_files,
-    restore_files_for_packages,
-    find_restorable_files,
     get_package_files,
     has_files_in_upper,
     is_package_in_writable_status,
+    restore_files_for_packages,
+    restore_opkg_metadata,
+    restore_package_files,
 )
 
 
@@ -123,7 +120,10 @@ class TestRestorePackageFiles:
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
             with patch("calculinux_update.opkg.overlayfs.find_restorable_files") as mock_find:
-                with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+                with patch(
+                    "calculinux_update.opkg.overlayfs.restore_lower_via_ioctl",
+                    return_value=True,
+                ):
                     with patch("subprocess.run") as mock_run:
                         mock_run.return_value = Mock(returncode=1, stdout="")  # Not installed
                         mock_find.return_value = [Path("/usr/bin/app"), Path("/usr/bin/tool")]
@@ -173,7 +173,10 @@ class TestRestorePackageFiles:
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
             with patch("calculinux_update.opkg.overlayfs.find_restorable_files") as mock_find:
-                with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=False):
+                with patch(
+                    "calculinux_update.opkg.overlayfs.restore_lower_via_ioctl",
+                    return_value=False,
+                ):
                     with patch("subprocess.run") as mock_run:
                         mock_run.return_value = Mock(returncode=1, stdout="")
                         mock_find.return_value = [Path("/usr/bin/app")]
@@ -245,7 +248,10 @@ class TestRestoreOpkgMetadata:
 
         # Mock the ioctl functions
         with patch("calculinux_update.opkg.overlayfs.is_file_restorable", return_value=True):
-            with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+            with patch(
+                "calculinux_update.opkg.overlayfs.restore_lower_via_ioctl",
+                return_value=True,
+            ):
                 result = restore_opkg_metadata(package, str(info_dir))
 
         # Should attempt to restore multiple metadata files
@@ -292,8 +298,14 @@ class TestRestoreOpkgMetadata:
             call_count += 1
             return call_count <= 2  # First 2 calls return True
 
-        with patch("calculinux_update.opkg.overlayfs.is_file_restorable", side_effect=mock_restorable):
-            with patch("calculinux_update.opkg.overlayfs.restore_lower_via_ioctl", return_value=True):
+        with patch(
+            "calculinux_update.opkg.overlayfs.is_file_restorable",
+            side_effect=mock_restorable,
+        ):
+            with patch(
+                "calculinux_update.opkg.overlayfs.restore_lower_via_ioctl",
+                return_value=True,
+            ):
                 result = restore_opkg_metadata(package, str(info_dir))
 
         assert result == 2
@@ -367,7 +379,10 @@ class TestHasFilesInUpper:
 
         # Mock: files are in upper (real files)
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_UPPER):
+            with patch(
+                "calculinux_update.opkg.overlayfs.check_file_restorability",
+                return_value=FileRestorability.IN_UPPER,
+            ):
                 result = has_files_in_upper("test-package")
 
         assert result is True
@@ -378,7 +393,10 @@ class TestHasFilesInUpper:
 
         # Mock: file is a whiteout, so should return False
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.WHITEOUT):
+            with patch(
+                "calculinux_update.opkg.overlayfs.check_file_restorability",
+                return_value=FileRestorability.WHITEOUT,
+            ):
                 result = has_files_in_upper("test-package")
 
         assert result is False
@@ -389,7 +407,10 @@ class TestHasFilesInUpper:
 
         # Mock: files are in lower only (not in upper)
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_LOWER_ONLY):
+            with patch(
+                "calculinux_update.opkg.overlayfs.check_file_restorability",
+                return_value=FileRestorability.IN_LOWER_ONLY,
+            ):
                 result = has_files_in_upper("test-package")
 
         assert result is False
@@ -405,7 +426,10 @@ class TestHasFilesInUpper:
             return FileRestorability.WHITEOUT
 
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", side_effect=mock_restorability):
+            with patch(
+                "calculinux_update.opkg.overlayfs.check_file_restorability",
+                side_effect=mock_restorability,
+            ):
                 result = has_files_in_upper("test-package")
 
         # Should return True because at least one real file exists
@@ -438,7 +462,10 @@ class TestHasFilesInUpper:
 
         # Mock: directory is a real file in upper
         with patch("calculinux_update.opkg.overlayfs.get_package_files", return_value=mock_files):
-            with patch("calculinux_update.opkg.overlayfs.check_file_restorability", return_value=FileRestorability.IN_UPPER):
+            with patch(
+                "calculinux_update.opkg.overlayfs.check_file_restorability",
+                return_value=FileRestorability.IN_UPPER,
+            ):
                 result = has_files_in_upper("test-package")
 
         assert result is True

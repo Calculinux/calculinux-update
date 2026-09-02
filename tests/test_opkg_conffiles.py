@@ -1,17 +1,15 @@
 """Tests for config file handling during RAUC updates."""
 
 from pathlib import Path
-from unittest.mock import Mock, mock_open, patch
-
-import pytest
+from unittest.mock import Mock, patch
 
 from calculinux_update.opkg.conffiles import (
     ConffileInfo,
-    get_package_conffiles,
-    get_all_conffiles,
-    detect_modified_conffiles,
-    create_dpkg_new_files,
     _compute_md5,
+    create_dpkg_new_files,
+    detect_modified_conffiles,
+    get_all_conffiles,
+    get_package_conffiles,
 )
 
 
@@ -22,18 +20,18 @@ class TestComputeMd5:
         """Test successful MD5 computation."""
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello, World!")
-        
+
         md5 = _compute_md5(test_file)
-        
+
         # MD5 of "Hello, World!" is 65a8e27d8879283831b664bd8b7f0ad4
         assert md5 == "65a8e27d8879283831b664bd8b7f0ad4"
 
     def test_compute_md5_nonexistent_file(self, tmp_path):
         """Test MD5 computation for non-existent file."""
         test_file = tmp_path / "nonexistent.txt"
-        
+
         md5 = _compute_md5(test_file)
-        
+
         assert md5 is None
 
     def test_compute_md5_permission_denied(self, tmp_path):
@@ -41,7 +39,7 @@ class TestComputeMd5:
         test_file = tmp_path / "test.txt"
         test_file.write_text("test")
         test_file.chmod(0o000)
-        
+
         try:
             md5 = _compute_md5(test_file)
             assert md5 is None
@@ -61,12 +59,16 @@ class TestGetPackageConffiles:
             "/etc/test.conf d41d8cd98f00b204e9800998ecf8427e\n"
             "/etc/test2.conf 098f6bcd4621d373cade4e832627b4f6\n"
         )
-        
+
         conffiles = get_package_conffiles("test-package", str(info_dir))
-        
+
         assert len(conffiles) == 2
-        assert conffiles[0] == ConffileInfo("/etc/test.conf", "test-package", "d41d8cd98f00b204e9800998ecf8427e")
-        assert conffiles[1] == ConffileInfo("/etc/test2.conf", "test-package", "098f6bcd4621d373cade4e832627b4f6")
+        assert conffiles[0] == ConffileInfo(
+            "/etc/test.conf", "test-package", "d41d8cd98f00b204e9800998ecf8427e"
+        )
+        assert conffiles[1] == ConffileInfo(
+            "/etc/test2.conf", "test-package", "098f6bcd4621d373cade4e832627b4f6"
+        )
 
     def test_get_conffiles_without_checksums(self, tmp_path):
         """Test reading conffiles without MD5 checksums."""
@@ -77,9 +79,9 @@ class TestGetPackageConffiles:
             "/etc/test.conf\n"
             "/etc/test2.conf\n"
         )
-        
+
         conffiles = get_package_conffiles("test-package", str(info_dir))
-        
+
         assert len(conffiles) == 2
         assert conffiles[0] == ConffileInfo("/etc/test.conf", "test-package", None)
         assert conffiles[1] == ConffileInfo("/etc/test2.conf", "test-package", None)
@@ -95,9 +97,9 @@ class TestGetPackageConffiles:
             "\n"
             "/etc/test2.conf\n"
         )
-        
+
         conffiles = get_package_conffiles("test-package", str(info_dir))
-        
+
         assert len(conffiles) == 2
 
     def test_get_conffiles_relative_paths(self, tmp_path):
@@ -106,9 +108,9 @@ class TestGetPackageConffiles:
         info_dir.mkdir()
         conffiles_file = info_dir / "test-package.conffiles"
         conffiles_file.write_text("etc/test.conf\n")
-        
+
         conffiles = get_package_conffiles("test-package", str(info_dir))
-        
+
         assert len(conffiles) == 1
         assert conffiles[0].path == "/etc/test.conf"
 
@@ -116,9 +118,9 @@ class TestGetPackageConffiles:
         """Test handling when conffiles metadata doesn't exist."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
-        
+
         conffiles = get_package_conffiles("test-package", str(info_dir))
-        
+
         assert conffiles == []
 
     def test_get_conffiles_read_error(self, tmp_path):
@@ -128,7 +130,7 @@ class TestGetPackageConffiles:
         conffiles_file = info_dir / "test-package.conffiles"
         conffiles_file.write_text("/etc/test.conf\\n")
         conffiles_file.chmod(0o000)
-        
+
         try:
             conffiles = get_package_conffiles("test-package", str(info_dir))
             assert conffiles == []
@@ -143,17 +145,16 @@ class TestGetAllConffiles:
         """Test getting conffiles from multiple packages."""
         info_dir = tmp_path / "info"
         info_dir.mkdir()
-        
+
         (info_dir / "pkg1.conffiles").write_text("/etc/pkg1.conf\n")
         (info_dir / "pkg2.conffiles").write_text("/etc/pkg2.conf\n")
 
         conffiles = get_all_conffiles(["pkg1", "pkg2"], str(info_dir))
 
         assert len(conffiles) == 2
-        paths = [cf.path for cf in conffiles]
-        
+
         conffiles = get_all_conffiles([], str(info_dir))
-        
+
         assert conffiles == []
 
 
@@ -166,27 +167,27 @@ class TestDetectModifiedConffiles:
         info_dir = tmp_path / "info"
         info_dir.mkdir()
         (info_dir / "test-pkg.conffiles").write_text("/etc/test.conf\\n")
-        
+
         # Create actual config file
         etc_dir = tmp_path / "etc"
         etc_dir.mkdir()
         config_file = etc_dir / "test.conf"
         config_file.write_text("modified content")
-        
+
         # Create overlay structure
         overlay_dir = tmp_path / "overlay"
         overlay_etc = overlay_dir / "etc"
         (overlay_etc / "upper").mkdir(parents=True)
         (overlay_etc / "lower").mkdir(parents=True)
-        
+
         # Upper has modified version
         upper_file = overlay_etc / "upper" / "test.conf"
         upper_file.write_text("modified content")
-        
+
         # Lower has original version
         lower_file = overlay_etc / "lower" / "test.conf"
         lower_file.write_text("original content")
-        
+
         with patch("calculinux_update.opkg.conffiles.get_all_conffiles") as mock_get_all:
             mock_get_all.return_value = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
             with patch("pathlib.Path.exists") as mock_exists:
@@ -196,7 +197,7 @@ class TestDetectModifiedConffiles:
                         return True
                     return Path.exists(self)
                 mock_exists.side_effect = lambda: True
-                
+
                 with patch("calculinux_update.opkg.conffiles.Path") as mock_path_cls:
                     # Mock Path to return our test paths
                     def path_init(p):
@@ -207,9 +208,9 @@ class TestDetectModifiedConffiles:
                             mock_p.name = "test.conf"
                             return mock_p
                         return Path(p)
-                    
+
                     mock_path_cls.side_effect = path_init
-                    
+
                     with patch("calculinux_update.opkg.conffiles._compute_md5") as mock_md5:
                         # Different checksums indicate modification
                         def md5_side_effect(path):
@@ -219,37 +220,37 @@ class TestDetectModifiedConffiles:
                                 return "original_checksum"
                             return None
                         mock_md5.side_effect = md5_side_effect
-                        
+
                         modified = detect_modified_conffiles(
                             ["test-pkg"],
                             str(overlay_dir)
                         )
-                        
+
                         assert len(modified) == 1
                         assert modified[0].path == "/etc/test.conf"
 
     def test_detect_no_modifications(self, tmp_path):
         """Test when no config files are modified."""
         overlay_dir = tmp_path / "overlay"
-        
+
         with patch("calculinux_update.opkg.conffiles.get_all_conffiles") as mock_get_all:
             mock_get_all.return_value = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
             with patch("pathlib.Path.exists", return_value=True):
                 with patch("calculinux_update.opkg.conffiles._compute_md5") as mock_md5:
                     # Same checksum = no modification
                     mock_md5.return_value = "same_checksum"
-                    
+
                     modified = detect_modified_conffiles(
                         ["test-pkg"],
                         str(overlay_dir)
                     )
-                    
+
                     assert modified == []
 
     def test_detect_conffile_not_in_filesystem(self, tmp_path):
         """Test handling when conffile doesn't exist in filesystem."""
         overlay_dir = tmp_path / "overlay"
-        
+
         with patch("calculinux_update.opkg.conffiles.get_all_conffiles") as mock_get_all:
             mock_get_all.return_value = [ConffileInfo("/etc/missing.conf", "test-pkg", None)]
             with patch("pathlib.Path.exists", return_value=False):
@@ -257,7 +258,7 @@ class TestDetectModifiedConffiles:
                     ["test-pkg"],
                     str(overlay_dir)
                 )
-                
+
                 assert modified == []
 
 
@@ -270,16 +271,16 @@ class TestCreateDpkgNewFiles:
         overlay_dir = tmp_path / "overlay"
         overlay_etc = overlay_dir / "etc"
         (overlay_etc / "lower").mkdir(parents=True)
-        
+
         lower_file = overlay_etc / "lower" / "test.conf"
         lower_file.write_text("new content from base image")
-        
+
         # Create actual etc directory for dpkg-new file
         etc_dir = tmp_path / "etc"
         etc_dir.mkdir()
-        
+
         modified = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
-        
+
         with patch("pathlib.Path") as mock_path_cls:
             def path_side_effect(p):
                 if str(p).endswith("test.conf.dpkg-new"):
@@ -288,14 +289,14 @@ class TestCreateDpkgNewFiles:
                     return lower_file
                 return Path(p)
             mock_path_cls.side_effect = path_side_effect
-            
+
             with patch("shutil.copy2") as mock_copy:
                 created = create_dpkg_new_files(
                     modified,
                     str(overlay_dir),
                     dry_run=False
                 )
-                
+
                 assert len(created) == 1
                 assert "/etc/test.conf" in created
                 mock_copy.assert_called_once()
@@ -304,7 +305,7 @@ class TestCreateDpkgNewFiles:
         """Test dry run doesn't create files."""
         overlay_dir = tmp_path / "overlay"
         modified = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
-        
+
         with patch("pathlib.Path.exists", return_value=True):
             with patch("shutil.copy2") as mock_copy:
                 created = create_dpkg_new_files(
@@ -312,7 +313,7 @@ class TestCreateDpkgNewFiles:
                     str(overlay_dir),
                     dry_run=True
                 )
-                
+
                 assert len(created) == 1
                 mock_copy.assert_not_called()
 
@@ -320,21 +321,21 @@ class TestCreateDpkgNewFiles:
         """Test handling when lower file is missing."""
         overlay_dir = tmp_path / "overlay"
         modified = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
-        
+
         with patch("pathlib.Path.exists", return_value=False):
             created = create_dpkg_new_files(
                 modified,
                 str(overlay_dir),
                 dry_run=False
             )
-            
+
             assert created == {}
 
     def test_create_dpkg_new_files_copy_error(self, tmp_path):
         """Test handling copy errors."""
         overlay_dir = tmp_path / "overlay"
         modified = [ConffileInfo("/etc/test.conf", "test-pkg", None)]
-        
+
         with patch("pathlib.Path.exists", return_value=True):
             with patch("shutil.copy2", side_effect=OSError("Permission denied")):
                 created = create_dpkg_new_files(
@@ -342,5 +343,5 @@ class TestCreateDpkgNewFiles:
                     str(overlay_dir),
                     dry_run=False
                 )
-                
+
                 assert created == {}

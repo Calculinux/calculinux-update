@@ -12,13 +12,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from .opkg.overlayfs import restore_files_for_packages, get_package_files
+from .opkg.conffiles import create_dpkg_new_files, detect_modified_conffiles
+from .opkg.overlayfs import get_package_files, restore_files_for_packages
 from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
-from .opkg.conffiles import detect_modified_conffiles, create_dpkg_new_files
 from .version_compat import check_compatibility, load_version_manifest
 
 LOG = logging.getLogger("calculinux_update.hooks")
@@ -426,11 +426,11 @@ def run_slot_hook(hook: str, slot: str) -> None:
     # This needs to happen before reboot while we have access to both old and new status
     image_packages = load_package_names(image_status)
     modified_conffiles = detect_modified_conffiles(list(image_packages))
-    
+
     if modified_conffiles:
         LOG.info("detected %d modified config file(s)", len(modified_conffiles))
         created_files = create_dpkg_new_files(modified_conffiles)
-        
+
         if created_files:
             LOG.info("created %d .dpkg-new file(s) for modified configs", len(created_files))
             # Save list of modified conffiles for post-reboot reporting
@@ -510,7 +510,12 @@ def postreboot_entrypoint() -> None:
                     LOG.warning("failed to save boot ID: %s", e)
 
             # Clean up state files except boot ID (kept to prevent re-processing)
-            for path in [PRE_UPDATE_WRITABLE_STATUS, PRE_UPDATE_SLOT_NAME, UPDATED_SLOT_NAME, MODIFIED_CONFFILES_FILE]:
+            for path in [
+                PRE_UPDATE_WRITABLE_STATUS,
+                PRE_UPDATE_SLOT_NAME,
+                UPDATED_SLOT_NAME,
+                MODIFIED_CONFFILES_FILE,
+            ]:
                 path.unlink(missing_ok=True)
         else:
             LOG.error("post-reboot reconciliation incomplete; will retry")
@@ -539,24 +544,24 @@ def _prune_status_only_duplicates(packages: List[str]) -> None:
 
 def _report_modified_conffiles() -> None:
     """Report modified config files to the user.
-    
+
     Reads the list of modified conffiles created during the update and logs them
     along with their corresponding .dpkg-new file locations.
     """
     if not MODIFIED_CONFFILES_FILE.exists():
         return
-    
+
     try:
         with open(MODIFIED_CONFFILES_FILE, 'r') as f:
             lines = [line.strip() for line in f if line.strip()]
-        
+
         if not lines:
             return
-        
+
         LOG.info("=== Modified Configuration Files ===")
         LOG.info("The following config files were modified and have new versions available:")
         LOG.info("")
-        
+
         for line in lines:
             parts = line.split('\\t', 1)
             if len(parts) == 2:
@@ -564,13 +569,13 @@ def _report_modified_conffiles() -> None:
                 dpkg_new = conf_path + '.dpkg-new'
                 LOG.info("  %s (from package: %s)", conf_path, package)
                 LOG.info("    New version saved as: %s", dpkg_new)
-        
+
         LOG.info("")
         LOG.info("To apply the new versions, compare and merge the changes:")
         LOG.info("  diff <original-file> <original-file>.dpkg-new")
         LOG.info("  mv <original-file>.dpkg-new <original-file>  # to accept new version")
         LOG.info("=================================")
-        
+
     except (OSError, IOError) as e:
         LOG.warning("failed to read modified conffiles list: %s", e)
 
