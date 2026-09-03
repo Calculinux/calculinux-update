@@ -61,15 +61,15 @@ def _state_lock():
     """
     _ensure_state_dir()
     lock_fd = None
+    lock_path = STATE_DIR / ".lock"
     try:
-        lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_WRONLY, 0o600)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         LOG.debug("acquired state lock")
         yield
     except (OSError, IOError) as e:
-        LOG.warning("failed to acquire state lock: %s", e)
-        # Proceed without lock - better than blocking forever
-        yield
+        LOG.error("failed to acquire state lock: %s", e)
+        raise SystemExit(1) from e
     finally:
         if lock_fd is not None:
             try:
@@ -269,10 +269,10 @@ def _detect_rollback() -> Dict[str, any]:
             # Fall back to package comparison
             if PRE_UPDATE_WRITABLE_STATUS.exists():
                 saved_packages = {
-                    e["Package"] for e in load_status_entries(PRE_UPDATE_WRITABLE_STATUS)
+                    e.name for e in load_status_entries(PRE_UPDATE_WRITABLE_STATUS)
                 }
                 current_packages = {
-                    e["Package"] for e in load_status_entries(WRITABLE_STATUS)
+                    e.name for e in load_status_entries(WRITABLE_STATUS)
                 }
                 missing = saved_packages - current_packages
 
@@ -397,15 +397,14 @@ def run_slot_hook(hook: str, slot: str) -> None:
         LOG.error("current image status %s missing - image too old?", CURRENT_IMAGE_STATUS)
         raise SystemExit(1)
 
-    try:
-        _prune_writable_status(image_status)
-        plan = compute_reconcile_plan(
-            image_status=image_status,
-            writable_status=WRITABLE_STATUS,
-            current_status=CURRENT_IMAGE_STATUS,
-        )
-    finally:
-        pass
+    # Plan first while writable status still lists overlay copies of
+    # packages that are also in the new image. Pruning those entries
+    # before planning makes every duplicate look like it vanished.
+    plan = compute_reconcile_plan(
+        image_status=image_status,
+        writable_status=WRITABLE_STATUS,
+        current_status=CURRENT_IMAGE_STATUS,
+    )
 
     # Phase 1: Remove packages from status file that have no files in upper layer
     # This is safe to do before reboot since there are no physical files to remove
@@ -416,35 +415,14 @@ def run_slot_hook(hook: str, slot: str) -> None:
         )
         _prune_status_only_duplicates(plan.status_only_duplicates)
 
-    # Phase 2: Physical duplicate removal will happen in post-reboot
-    # Queue packages that have actual files in upper layer for removal after reboot
+    # Phase 2: Physical duplicate removal and overlay upgrades happen after reboot
     _write_pending(PENDING_DUPLICATES_FILE, plan.duplicates, "duplicate removal")
     _write_pending(PENDING_REINSTALL_FILE, plan.reinstall, "reinstall")
     _write_pending(PENDING_UPGRADE_FILE, plan.upgrade, "upgrade")
 
-    # Phase 3: Detect modified config files and create .dpkg-new files
-    # This needs to happen before reboot while we have access to both old and new status
-    image_packages = load_package_names(image_status)
-    modified_conffiles = detect_modified_conffiles(list(image_packages))
+    # Conffile .dpkg-new files are created post-reboot from the new lower layer.
 
-    if modified_conffiles:
-        LOG.info("detected %d modified config file(s)", len(modified_conffiles))
-        created_files = create_dpkg_new_files(modified_conffiles)
-
-        if created_files:
-            LOG.info("created %d .dpkg-new file(s) for modified configs", len(created_files))
-            # Save list of modified conffiles for post-reboot reporting
-            try:
-                _ensure_state_dir()
-                conffile_data = "\n".join(
-                    f"{cf.path}\t{cf.package}" for cf in modified_conffiles
-                )
-                _atomic_write(MODIFIED_CONFFILES_FILE, conffile_data + "\n")
-            except (OSError, IOError) as e:
-                LOG.warning("failed to save modified conffiles list: %s", e)
-
-    # Mark status as pruned - the hook has done all the preparation work
-    # If there are no pending operations, the post-reboot service won't need to run
+    # Marker is informational; systemd starts post-reboot from pending-* files.
     try:
         _atomic_write(STATUS_PRUNED_MARKER, "pruned\n")
         LOG.info("marked status as pruned for new image")
@@ -497,7 +475,8 @@ def postreboot_entrypoint() -> None:
         if duplicates_status and reinstall_status and upgrade_status:
             LOG.info("post-reboot package reconciliation complete")
 
-            # Report modified config files to user
+            # New lower layer is the updated image; copy its conffiles to .dpkg-new
+            _create_new_conffiles_from_lower()
             _report_modified_conffiles()
 
             # Save boot ID to prevent re-processing
@@ -542,6 +521,27 @@ def _prune_status_only_duplicates(packages: List[str]) -> None:
         LOG.info("pruned %d status-only duplicate(s) from writable status", len(packages))
 
 
+def _create_new_conffiles_from_lower() -> None:
+    """Create .dpkg-new files from the new image lower layer after reboot."""
+    if not CURRENT_IMAGE_STATUS.exists():
+        return
+    try:
+        image_packages = load_package_names(CURRENT_IMAGE_STATUS)
+        modified_conffiles = detect_modified_conffiles(list(image_packages))
+        if not modified_conffiles:
+            return
+        LOG.info("detected %d modified config file(s)", len(modified_conffiles))
+        created_files = create_dpkg_new_files(modified_conffiles)
+        if created_files:
+            LOG.info("created %d .dpkg-new file(s) for modified configs", len(created_files))
+            conffile_data = "\n".join(
+                f"{cf.path}\t{cf.package}" for cf in modified_conffiles
+            )
+            _atomic_write(MODIFIED_CONFFILES_FILE, conffile_data + "\n")
+    except Exception as e:
+        LOG.warning("failed to create .dpkg-new files: %s", e)
+
+
 def _report_modified_conffiles() -> None:
     """Report modified config files to the user.
 
@@ -563,7 +563,7 @@ def _report_modified_conffiles() -> None:
         LOG.info("")
 
         for line in lines:
-            parts = line.split('\\t', 1)
+            parts = line.split('\t', 1)
             if len(parts) == 2:
                 conf_path, package = parts
                 dpkg_new = conf_path + '.dpkg-new'
@@ -695,11 +695,22 @@ def _remove_duplicate_pkg(pkg: str) -> bool:
     return True
 
 
+def _record_leftover(pkg: str, reason: str) -> None:
+    path = STATE_DIR / "update-state.leftovers"
+    try:
+        _ensure_state_dir()
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{pkg}\t{reason}\n")
+    except (OSError, IOError) as e:
+        LOG.warning("failed to record leftover %s: %s", pkg, e)
+
+
 def _upgrade_pkg(pkg: str) -> bool:
     result = _run_opkg(["upgrade", pkg])
     if not result:
-        LOG.warning("failed to upgrade %s", pkg)
-    return result
+        LOG.warning("failed to upgrade %s; leaving installed as-is", pkg)
+        _record_leftover(pkg, "upgrade")
+    return True
 
 
 def _run_opkg(args: List[str]) -> bool:

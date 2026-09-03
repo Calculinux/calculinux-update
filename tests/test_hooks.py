@@ -75,10 +75,10 @@ def test_run_slot_hook(monkeypatch, tmp_path):
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
     monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status_image))
 
-    pruned = {}
-    monkeypatch.setattr(
-        hooks, "prune_writable_status", lambda *_: pruned.setdefault("called", True)
-    )
+    def _must_not_prune_all(*_args, **_kwargs):
+        raise AssertionError("must not prune all writable packages before computing the plan")
+
+    monkeypatch.setattr(hooks, "_prune_writable_status", _must_not_prune_all)
 
     plan = ReconcilePlan(
         duplicates=["base"],
@@ -247,9 +247,16 @@ def test_upgrade_pkg_failure(monkeypatch):
         captured.append(args)
         return False
 
+    leftovers = []
+
+    def fake_leftover(pkg, reason):
+        leftovers.append((pkg, reason))
+
     monkeypatch.setattr(hooks, "_run_opkg", fake_run)
-    assert not hooks._upgrade_pkg("bar")
+    monkeypatch.setattr(hooks, "_record_leftover", fake_leftover)
+    assert hooks._upgrade_pkg("bar") is True
     assert captured == [["upgrade", "bar"]]
+    assert leftovers == [("bar", "upgrade")]
 
 
 def test_write_pending_no_packages(tmp_path):
