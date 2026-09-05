@@ -3,8 +3,9 @@
 set -euo pipefail
 
 self_check() {
-  local tmp
+  # Not local: EXIT trap must still see $tmp after the function returns.
   tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
   cat >"$tmp/calculinux-update_0.3.2.bb" <<'EOF'
 SRC_URI = "git://github.com/Calculinux/calculinux-update.git;branch=main;protocol=https"
 SRCREV = "oldrevoldrevoldrevoldrevoldrevoldrevoldrev"
@@ -12,7 +13,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=oldmd5oldmd5oldmd5oldmd5oldmd5old"
 EOF
   VERSION=0.7.0 REV=0123456789abcdef0123456789abcdef01234567 \
     LICENSE_MD5=1ebbd3e34237af26da5dc08a4e440464 \
-    RECIPE_DIR="$tmp" "$0" --apply
+    RECIPE_DIR="$tmp" bash "$0" --apply
   test -f "$tmp/calculinux-update_0.7.0.bb"
   test ! -f "$tmp/calculinux-update_0.3.2.bb"
   grep -q 'SRCREV = "0123456789abcdef0123456789abcdef01234567"' \
