@@ -2,7 +2,9 @@
 Description=Calculinux post-reboot package reconciliation
 Wants=network-online.target
 After=network-online.target
-# Run only when the RAUC hook queued work. OR across these ConditionPathExists.
+# Hook always writes updated-slot; pending-* only exist when packages need work.
+# OR across these ConditionPathExists so a no-package update still post-processes.
+ConditionPathExists=|/var/lib/calculinux-update/update-state.updated-slot
 ConditionPathExists=|/var/lib/calculinux-update/update-state.pending-duplicates
 ConditionPathExists=|/var/lib/calculinux-update/update-state.pending-reinstalls
 ConditionPathExists=|/var/lib/calculinux-update/update-state.pending-upgrades

@@ -61,6 +61,7 @@ def _state_lock():
     """
     _ensure_state_dir()
     lock_fd = None
+    # Derive from STATE_DIR so test/runtime overrides stay consistent.
     lock_path = STATE_DIR / ".lock"
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
@@ -456,49 +457,41 @@ def postreboot_entrypoint() -> None:
             PENDING_UPGRADE_FILE.exists()
         )
 
-        # If no pending operations, we're done
-        # The hook has already pruned the writable status
-        if not has_pending:
-            LOG.info("no pending operations")
-            return
+        if has_pending:
+            if not _run_opkg(["update"]):
+                LOG.error("opkg update failed; will retry next boot")
+                raise SystemExit(1)
 
-        if not _run_opkg(["update"]):
-            LOG.error("opkg update failed; will retry next boot")
-            raise SystemExit(1)
-
-        # Phase 2: Remove physical duplicates (packages with files in upper layer)
-        # This must happen after reboot when we're running from the new base image
-        duplicates_status = _process_pending(PENDING_DUPLICATES_FILE, _remove_duplicate_pkg)
-        reinstall_status = _process_pending(PENDING_REINSTALL_FILE, _install_reinstall_pkg)
-        upgrade_status = _process_pending(PENDING_UPGRADE_FILE, _upgrade_pkg)
-
-        if duplicates_status and reinstall_status and upgrade_status:
+            # Phase 2: Physical duplicates / overlay upgrades after reboot
+            duplicates_status = _process_pending(PENDING_DUPLICATES_FILE, _remove_duplicate_pkg)
+            reinstall_status = _process_pending(PENDING_REINSTALL_FILE, _install_reinstall_pkg)
+            upgrade_status = _process_pending(PENDING_UPGRADE_FILE, _upgrade_pkg)
+            if not (duplicates_status and reinstall_status and upgrade_status):
+                LOG.error("post-reboot reconciliation incomplete; will retry")
+                raise SystemExit(1)
             LOG.info("post-reboot package reconciliation complete")
-
-            # New lower layer is the updated image; copy its conffiles to .dpkg-new
-            _create_new_conffiles_from_lower()
-            _report_modified_conffiles()
-
-            # Save boot ID to prevent re-processing
-            current_boot_id = _get_current_boot_id()
-            if current_boot_id:
-                try:
-                    _ensure_state_dir()
-                    _atomic_write(UPDATE_BOOT_ID, current_boot_id + "\n")
-                except (OSError, IOError) as e:
-                    LOG.warning("failed to save boot ID: %s", e)
-
-            # Clean up state files except boot ID (kept to prevent re-processing)
-            for path in [
-                PRE_UPDATE_WRITABLE_STATUS,
-                PRE_UPDATE_SLOT_NAME,
-                UPDATED_SLOT_NAME,
-                MODIFIED_CONFFILES_FILE,
-            ]:
-                path.unlink(missing_ok=True)
         else:
-            LOG.error("post-reboot reconciliation incomplete; will retry")
-            raise SystemExit(1)
+            LOG.info("no pending package operations")
+
+        # Conffiles and cleanup run even when the update queued no packages
+        _create_new_conffiles_from_lower()
+        _report_modified_conffiles()
+
+        current_boot_id = _get_current_boot_id()
+        if current_boot_id:
+            try:
+                _ensure_state_dir()
+                _atomic_write(UPDATE_BOOT_ID, current_boot_id + "\n")
+            except (OSError, IOError) as e:
+                LOG.warning("failed to save boot ID: %s", e)
+
+        for path in [
+            PRE_UPDATE_WRITABLE_STATUS,
+            PRE_UPDATE_SLOT_NAME,
+            UPDATED_SLOT_NAME,
+            MODIFIED_CONFFILES_FILE,
+        ]:
+            path.unlink(missing_ok=True)
 
 
 def _prune_writable_status(image_status: Path) -> None:

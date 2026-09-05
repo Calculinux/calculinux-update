@@ -174,6 +174,43 @@ def test_postreboot_entrypoint(monkeypatch, tmp_path):
     assert not upg.exists()
 
 
+def test_postreboot_entrypoint_no_pending_still_cleans_up(monkeypatch, tmp_path):
+    """An update with no package ops still creates conffiles and clears state."""
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(hooks, "PENDING_DUPLICATES_FILE", tmp_path / "pending-duplicates")
+    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", tmp_path / "pending-reinstalls")
+    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "pending-upgrades")
+    updated = tmp_path / "updated-slot"
+    updated.write_text("rootfs.1\n")
+    monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated)
+    monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", tmp_path / "pre-status")
+    monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", tmp_path / "pre-slot")
+    monkeypatch.setattr(hooks, "MODIFIED_CONFFILES_FILE", tmp_path / "conffiles")
+    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
+    monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "boot-1")
+    monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "boot-id")
+
+    opkg_calls = []
+    conffile_called = []
+
+    def mark_create():
+        conffile_called.append("create")
+
+    def mark_report():
+        conffile_called.append("report")
+
+    monkeypatch.setattr(hooks, "_run_opkg", lambda args: opkg_calls.append(args) or True)
+    monkeypatch.setattr(hooks, "_create_new_conffiles_from_lower", mark_create)
+    monkeypatch.setattr(hooks, "_report_modified_conffiles", mark_report)
+
+    hooks.postreboot_entrypoint()
+    assert opkg_calls == []
+    assert conffile_called == ["create", "report"]
+    assert not updated.exists()
+    assert (tmp_path / "boot-id").read_text() == "boot-1\n"
+
+
 def test_postreboot_entrypoint_update_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("os.geteuid", lambda: 0)  # Mock root check
     rein = tmp_path / "reinstall"
