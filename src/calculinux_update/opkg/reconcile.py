@@ -76,16 +76,15 @@ def compute_reconcile_plan(
         else:
             status_only_duplicates.append(pkg)
 
+    # current_status is accepted for API stability but is not used:
+    # packages dropped from the new image were image contents, not extra
+    # user installs, and must not be reinstalled on a distro upgrade.
+    _ = current_status
     reinstall: List[str] = []
-    if current_status and current_status.exists():
-        current_packages = load_package_names(current_status)
-        reinstall = sorted(
-            pkg
-            for pkg in current_packages
-            if pkg not in image_packages and pkg not in writable_packages
-        )
 
-    upgrade = sorted(writable_packages)
+    # Only overlay-only packages need a feed upgrade. Duplicates are
+    # removed (or status-pruned) so the new image copy wins.
+    upgrade = sorted(writable_packages - image_packages)
     return ReconcilePlan(
         duplicates=duplicates,
         status_only_duplicates=status_only_duplicates,

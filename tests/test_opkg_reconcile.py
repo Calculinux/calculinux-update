@@ -26,8 +26,8 @@ def test_compute_reconcile_plan(tmp_path):
 
     assert plan.duplicates == ["base"]
     assert plan.status_only_duplicates == []
-    assert plan.reinstall == ["missing"]
-    assert plan.upgrade == ["base", "overlay"]
+    assert plan.reinstall == []
+    assert plan.upgrade == ["overlay"]
     assert plan.any_actions()
 
 
@@ -54,12 +54,7 @@ def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):
     # Packages without files in upper go to status_only_duplicates (safe status pruning)
     assert plan.status_only_duplicates == ["pkg-without-files"]
     assert plan.reinstall == []
-    assert sorted(plan.upgrade) == [
-        "local-only",
-        "pkg-also-with",
-        "pkg-with-files",
-        "pkg-without-files",
-    ]
+    assert plan.upgrade == ["local-only"]
 
 
 def test_compute_reconcile_plan_all_status_only(tmp_path):
@@ -75,7 +70,7 @@ def test_compute_reconcile_plan_all_status_only(tmp_path):
 
     assert plan.duplicates == []
     assert sorted(plan.status_only_duplicates) == ["pkg1", "pkg2"]
-    assert sorted(plan.upgrade) == ["local", "pkg1", "pkg2"]
+    assert plan.upgrade == ["local"]
 
 
 def test_prune_writable_status(tmp_path):
