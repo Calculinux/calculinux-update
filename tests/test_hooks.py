@@ -360,41 +360,6 @@ def test_prune_writable_status_noop(monkeypatch, tmp_path):
 # Rollback detection tests
 
 
-def test_get_booted_slot_name_success(monkeypatch):
-    """Test successful slot name parsing from rauc status."""
-    fake_output = """RAUC_SLOT_STATE_rootfs.0=booted
-RAUC_SLOT_STATE_rootfs.1=inactive
-RAUC_SLOT_STATE_appfs.0=active
-"""
-    result = SimpleNamespace(stdout=fake_output, returncode=0)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: result)
-
-    slot_name = hooks._get_booted_slot_name()
-    assert slot_name == "rootfs.0"
-
-
-def test_get_booted_slot_name_rauc_not_found(monkeypatch):
-    """Test handling when rauc binary is not found."""
-    def fake_run(*args, **kwargs):
-        raise FileNotFoundError("rauc not found")
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    slot_name = hooks._get_booted_slot_name()
-    assert slot_name is None
-
-
-def test_get_booted_slot_name_rauc_error(monkeypatch):
-    """Test handling when rauc command fails."""
-    from subprocess import CalledProcessError
-
-    def fake_run(*args, **kwargs):
-        raise CalledProcessError(1, "rauc")
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    slot_name = hooks._get_booted_slot_name()
-    assert slot_name is None
-
-
 def test_get_current_boot_id_success(tmp_path, monkeypatch):
     """Test reading boot ID from /proc."""
     boot_id = "d359b438-b28b-416b-9270-257484a8a58e"
@@ -662,3 +627,76 @@ def test_detect_rollback_cleans_up_on_boot_id_match(tmp_path, monkeypatch):
     assert not pre_update_slot.exists()
     assert not updated_slot.exists()
     assert not boot_id_file.exists()
+
+
+SYSTEM_CONF = """\
+[system]
+compatible=calculinux-luckfox-lyra
+bootloader=uboot
+
+[slot.rootfs.0]
+device=/dev/disk/by-partlabel/ROOT_A
+type=ext4
+bootname=A
+
+[slot.rootfs.1]
+device=/dev/disk/by-partlabel/ROOT_B
+type=ext4
+bootname=B
+"""
+
+
+@pytest.fixture
+def rauc_env(tmp_path, monkeypatch):
+    conf = tmp_path / "system.conf"
+    conf.write_text(SYSTEM_CONF)
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=ttyFIQ0 ro root=PARTLABEL=ROOT_B rauc.slot=B rootwait\n")
+    monkeypatch.setattr(hooks, "RAUC_SYSTEM_CONF", conf)
+    monkeypatch.setattr(hooks, "PROC_CMDLINE", cmdline)
+    monkeypatch.delenv("RAUC_CURRENT_BOOTNAME", raising=False)
+    monkeypatch.delenv("RAUC_SYSTEM_CONFIG", raising=False)
+
+    def no_rauc(*args, **kwargs):
+        raise AssertionError("rauc status must not be called")
+
+    monkeypatch.setattr(hooks.subprocess, "run", no_rauc)
+    return SimpleNamespace(conf=conf, cmdline=cmdline)
+
+
+def test_booted_slot_from_hook_env_without_rauc_service(rauc_env, monkeypatch):
+    # Inside a RAUC handler the service is busy; the env must be enough.
+    monkeypatch.setenv("RAUC_CURRENT_BOOTNAME", "A")
+    monkeypatch.setenv("RAUC_SYSTEM_CONFIG", str(rauc_env.conf))
+    assert hooks._get_booted_slot_name() == "rootfs.0"
+
+
+def test_booted_slot_from_cmdline(rauc_env):
+    assert hooks._get_booted_slot_name() == "rootfs.1"
+
+
+def test_booted_slot_falls_back_to_rauc_status_json(rauc_env, monkeypatch):
+    rauc_env.cmdline.write_text("console=ttyFIQ0 ro\n")
+    output = (
+        '{"compatible":"calculinux-luckfox-lyra","booted":"B","slots":['
+        '{"rootfs.1":{"class":"rootfs","bootname":"B","state":"booted"}},'
+        '{"rootfs.0":{"class":"rootfs","bootname":"A","state":"inactive"}}]}'
+    )
+    monkeypatch.setattr(
+        hooks.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=output)
+    )
+    assert hooks._get_booted_slot_name() == "rootfs.1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [hooks.subprocess.CalledProcessError(1, "rauc"), FileNotFoundError("rauc")],
+)
+def test_booted_slot_none_when_rauc_status_fails(rauc_env, monkeypatch, error):
+    rauc_env.cmdline.write_text("console=ttyFIQ0 ro\n")
+
+    def busy(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(hooks.subprocess, "run", busy)
+    assert hooks._get_booted_slot_name() is None

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import fcntl
+import json
 import logging
 import os
 import subprocess
@@ -31,6 +33,10 @@ LOG.addHandler(handler)
 WRITABLE_STATUS = Path("/var/lib/opkg/status")
 CURRENT_IMAGE_STATUS = Path("/var/lib/opkg/status.image")
 CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
+
+# RAUC / boot information
+RAUC_SYSTEM_CONF = Path("/etc/rauc/system.conf")
+PROC_CMDLINE = Path("/proc/cmdline")
 
 # State directory for calculinux-update
 STATE_DIR = Path("/var/lib/calculinux-update")
@@ -127,23 +133,73 @@ def _ensure_state_dir() -> None:
         LOG.debug("could not create state directory: %s", e)
 
 
-def _get_booted_slot_name() -> Optional[str]:
-    """Get the name of the currently booted slot from RAUC."""
+def _booted_bootname() -> Optional[str]:
+    """Return the booted slot's bootname without talking to the RAUC service.
+
+    RAUC exports RAUC_CURRENT_BOOTNAME to handlers and hooks. Outside of RAUC,
+    fall back to the rauc.slot= argument the bootloader puts on the cmdline.
+    """
+    bootname = os.environ.get("RAUC_CURRENT_BOOTNAME")
+    if bootname:
+        return bootname
     try:
-        result = subprocess.run(
-            ["rauc", "status", "--output-format=shell"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # Parse output for RAUC_SLOT_STATE_<slot>=booted
-        for line in result.stdout.splitlines():
-            if "RAUC_SLOT_STATE_" in line and line.endswith("=booted"):
-                # Extract slot name from RAUC_SLOT_STATE_rootfs.0=booted
-                slot_var = line.split("=")[0]
-                slot_name = slot_var.replace("RAUC_SLOT_STATE_", "")
+        cmdline = PROC_CMDLINE.read_text()
+    except OSError:
+        return None
+    for arg in cmdline.split():
+        if arg.startswith("rauc.slot="):
+            return arg.split("=", 1)[1] or None
+    return None
+
+
+def _slot_name_for_bootname(bootname: str) -> Optional[str]:
+    """Map a bootname (e.g. 'A') to its slot name (e.g. 'rootfs.0') via system.conf."""
+    conf_path = Path(os.environ.get("RAUC_SYSTEM_CONFIG") or RAUC_SYSTEM_CONF)
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        if not parser.read(conf_path):
+            return None
+    except configparser.Error as e:
+        LOG.warning("failed to parse %s: %s", conf_path, e)
+        return None
+    for section in parser.sections():
+        if not section.startswith("slot."):
+            continue
+        slot_name = section[len("slot."):]
+        if parser.get(section, "bootname", fallback=None) == bootname or slot_name == bootname:
+            return slot_name
+    return None
+
+
+def _booted_slot_from_rauc_status() -> Optional[str]:
+    """Ask the RAUC service for the booted slot.
+
+    This fails while an install is in progress (the service rejects status
+    queries while busy), so it is only a fallback for use outside of hooks.
+    """
+    result = subprocess.run(
+        ["rauc", "status", "--output-format=json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for entry in json.loads(result.stdout).get("slots", []):
+        for slot_name, info in entry.items():
+            if info.get("state") == "booted":
                 return slot_name
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    return None
+
+
+def _get_booted_slot_name() -> Optional[str]:
+    """Get the name of the currently booted slot (e.g. 'rootfs.1')."""
+    bootname = _booted_bootname()
+    if bootname:
+        slot_name = _slot_name_for_bootname(bootname)
+        if slot_name:
+            return slot_name
+    try:
+        return _booted_slot_from_rauc_status()
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError, AttributeError) as e:
         LOG.warning("failed to get booted slot: %s", e)
     return None
 
