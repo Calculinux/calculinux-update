@@ -69,9 +69,7 @@ jobs:
           git commit -m "Bump calculinux-update to ${VERSION}."
           git push --force origin bump/calculinux-update
 
-          body="Update the bitbake recipe to calculinux-update ${VERSION} (SRCREV \`${REV}\`).
-
-Opened automatically after a merge to Calculinux/calculinux-update@main."
+          body="$(printf 'Update the bitbake recipe to calculinux-update %s (SRCREV `%s`).\n\nOpened automatically after a merge to Calculinux/calculinux-update@main.' "$VERSION" "$REV")"
           existing="$(gh pr list --repo Calculinux/meta-calculinux --head bump/calculinux-update --state open --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --title "Bump calculinux-update to ${VERSION}" --body "$body"
