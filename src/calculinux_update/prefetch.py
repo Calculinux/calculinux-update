@@ -1,12 +1,31 @@
-"""Pre-download OPKG packages needed after installing a RAUC bundle."""
+"""Download, before the reboot, the packages the new image needs reinstalled.
+
+After an update that changes the release or the kernel, the overlay's own
+packages must be reinstalled from the new image's feeds (see
+opkg.reconcile). Doing that after the reboot would need the network, which is
+often not up yet. So ``cup install`` resolves and downloads them now, while
+the old system is online, into opkg's own cache format:
+
+- an offline opkg root holds the bundle's feed configuration and the new
+  image's status file as image status, with an empty writable status, so
+  ``opkg install --download-only`` fetches the packages plus every dependency
+  the new image lacks;
+- the downloads land in PREFETCH_CACHE_DIR, named the way ``opkg --cache-dir``
+  looks them up, and the feed lists are kept in PREFETCH_LISTS_DIR, so the
+  post-reboot install needs neither ``opkg update`` nor the network.
+
+PREFETCH_STATE_FILE records which image the cache is for (the SHA-256 of its
+status file), what was fetched and what could not be.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -14,24 +33,50 @@ from typing import List, Optional, Sequence
 from rich.console import Console
 
 from .bundle import BundleExtractionError, BundleExtras, extract_bundle_extras
-from .opkg.reconcile import ReconcilePlan, compute_reconcile_plan
+from .opkg.reconcile import compute_reconcile_plan
+from .version_compat import load_version_manifest
 
 PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
+PREFETCH_LISTS_DIR = Path("/var/lib/calculinux-update/prefetch-lists")
 PREFETCH_STATE_FILE = Path("/var/lib/calculinux-update/prefetch.json")
 WRITABLE_STATUS = Path("/var/lib/opkg/status")
 CURRENT_IMAGE_STATUS = Path("/var/lib/opkg/status.image")
+CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
+
+# Where opkg.conf in the image expects these (the offline root mirrors them)
+LISTS_DIR = "var/lib/opkg/lists"
+STATUS_FILE = "var/lib/opkg/status"
+IMAGE_STATUS_FILE = "var/lib/opkg/status.image"
+INFO_DIR = "var/lib/opkg/info"
 
 
 @dataclass(slots=True)
 class PrefetchResult:
     skipped: bool = False
-    downloaded: int = 0
-    planned: int = 0
     reason: Optional[str] = None
+    packages: List[str] = field(default_factory=list)
+    missing: List[str] = field(default_factory=list)
+    release_change: bool = False
 
 
 class PrefetchError(RuntimeError):
     pass
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_state(path: Optional[Path] = None) -> dict:
+    path = path or PREFETCH_STATE_FILE
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def prefetch_for_bundle(
@@ -45,12 +90,10 @@ def prefetch_for_bundle(
 
     if not extras:
         return PrefetchResult(skipped=True, reason="bundle extras missing")
-    image_status = getattr(extras, "image_status", None)
-    if image_status is None or not Path(image_status).exists():
-        extras.cleanup()
-        return PrefetchResult(skipped=True, reason="bundle status.image missing")
-
     try:
+        image_status = getattr(extras, "image_status", None)
+        if image_status is None or not Path(image_status).exists():
+            return PrefetchResult(skipped=True, reason="bundle status.image missing")
         return _prefetch_with_extras(extras, bundle_sha256, console)
     finally:
         extras.cleanup()
@@ -62,142 +105,130 @@ def _prefetch_with_extras(
     if not WRITABLE_STATUS.exists():
         return PrefetchResult(skipped=True, reason=f"{WRITABLE_STATUS} missing")
 
-    # Require status.image from current slot - all current Calculinux images have this
-    if not CURRENT_IMAGE_STATUS.exists():
-        return PrefetchResult(
-            skipped=True,
-            reason=f"{CURRENT_IMAGE_STATUS} missing - image may be too old"
-        )
-
+    new_manifest = {}
+    if getattr(extras, "version_manifest", None):
+        new_manifest = load_version_manifest(Path(extras.version_manifest))
     plan = compute_reconcile_plan(
-        image_status=extras.image_status,
+        image_status=Path(extras.image_status),
         writable_status=WRITABLE_STATUS,
         current_status=CURRENT_IMAGE_STATUS,
+        old_manifest=load_version_manifest(CURRENT_VERSION_MANIFEST),
+        new_manifest=new_manifest,
+        classify_duplicates=False,
     )
 
+    _clear_cache()
+    image_sha = file_sha256(Path(extras.image_status))
     if not plan.reinstall:
-        return PrefetchResult(skipped=True, reason="no reinstall packages")
+        _write_state(bundle_sha256, image_sha, [], [])
+        return PrefetchResult(
+            skipped=True,
+            reason="no overlay packages need reinstalling for this image",
+            release_change=plan.release_change,
+        )
 
-    downloader = OpkgDownloader(extras.opkg_root)
+    downloader = OpkgDownloader(Path(extras.opkg_root), Path(extras.image_status))
     try:
-        downloaded = downloader.download(plan.reinstall, PREFETCH_CACHE_DIR)
+        missing = downloader.download(plan.reinstall, PREFETCH_CACHE_DIR, PREFETCH_LISTS_DIR)
     except PrefetchError as exc:
-        return PrefetchResult(skipped=True, reason=str(exc))
-    _write_state(bundle_sha256, plan)
+        _write_state(bundle_sha256, image_sha, plan.reinstall, list(plan.reinstall))
+        return PrefetchResult(
+            skipped=True,
+            reason=str(exc),
+            packages=list(plan.reinstall),
+            missing=list(plan.reinstall),
+            release_change=plan.release_change,
+        )
+
+    _write_state(bundle_sha256, image_sha, plan.reinstall, missing)
+    fetched = len(plan.reinstall) - len(missing)
     console.print(
-        (
-            f"[green]Prefetched[/] {downloaded}/{len(plan.reinstall)} "
-            f"reinstall packages into {PREFETCH_CACHE_DIR}"
-        ),
+        f"[green]Prefetched[/] {fetched}/{len(plan.reinstall)} packages to reinstall "
+        "after the update",
         highlight=False,
     )
-    return PrefetchResult(downloaded=downloaded, planned=len(plan.reinstall))
+    return PrefetchResult(
+        packages=list(plan.reinstall),
+        missing=missing,
+        release_change=plan.release_change,
+    )
 
 
 class OpkgDownloader:
-    def __init__(self, opkg_root: Path) -> None:
-        self._opkg_root = opkg_root
+    """Runs opkg against an offline root that looks like the new image."""
 
-    def download(self, packages: Sequence[str], cache_dir: Path) -> int:
+    def __init__(self, opkg_root: Path, image_status: Path) -> None:
+        self._opkg_root = opkg_root
+        self._image_status = image_status
+
+    def download(
+        self, packages: Sequence[str], cache_dir: Path, lists_out: Path
+    ) -> List[str]:
+        """Download ``packages`` and their dependencies; return the ones that failed."""
+        source_config = self._opkg_root / "etc/opkg"
+        if not source_config.is_dir():
+            raise PrefetchError("bundle extras missing /etc/opkg directory")
+        if not (source_config / "opkg.conf").exists():
+            raise PrefetchError("bundle extras missing opkg.conf")
+
         cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="cup-prefetch-") as tmp:
-            offline_root = Path(tmp) / "root"
-            config_root = offline_root / "etc/opkg"
-            source_config = self._opkg_root / "etc/opkg"
-            if not source_config.is_dir():
-                raise PrefetchError("bundle extras missing /etc/opkg directory")
-            shutil.copytree(source_config, config_root)
-            conf_path = config_root / "opkg.conf"
-            if not conf_path.exists():
-                raise PrefetchError("bundle extras missing opkg.conf")
-            _patch_opkg_conf(conf_path, offline_root)
-            try:
-                self._run_opkg(conf_path, offline_root, ["update"])
-            except subprocess.CalledProcessError as exc:
-                raise PrefetchError(f"opkg update failed: {exc.stderr}") from exc
-            downloaded = 0
-            for pkg in packages:
-                if self._download_single(conf_path, offline_root, pkg, cache_dir):
-                    downloaded += 1
-            return downloaded
+            root = Path(tmp) / "root"
+            shutil.copytree(source_config, root / "etc/opkg")
+            for sub in (LISTS_DIR, INFO_DIR):
+                (root / sub).mkdir(parents=True, exist_ok=True)
+            (root / STATUS_FILE).write_text("")
+            shutil.copyfile(self._image_status, root / IMAGE_STATUS_FILE)
 
-    def _download_single(
-        self,
-        conf_path: Path,
-        offline_root: Path,
-        package: str,
-        cache_dir: Path,
-    ) -> bool:
-        result = subprocess.run(
+            result = self._run(root, cache_dir, ["update"])
+            if result.returncode != 0:
+                raise PrefetchError(f"opkg update failed: {result.stderr.strip()}")
+
+            missing: List[str] = []
+            args = ["install", "--download-only", "--force-reinstall"]
+            if self._run(root, cache_dir, [*args, *packages]).returncode != 0:
+                # Find out which ones cannot be resolved or fetched.
+                missing = [
+                    pkg for pkg in packages
+                    if self._run(root, cache_dir, [*args, pkg]).returncode != 0
+                ]
+
+            if lists_out.exists():
+                shutil.rmtree(lists_out)
+            shutil.copytree(root / LISTS_DIR, lists_out)
+            return missing
+
+    @staticmethod
+    def _run(root: Path, cache_dir: Path, args: List[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
             [
                 "opkg",
-                "--conf",
-                str(conf_path),
-                "--offline-root",
-                str(offline_root),
-                "download",
-                package,
-            ],
-            cwd=cache_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            return False
-        return True
-
-    def _run_opkg(self, conf_path: Path, offline_root: Path, args: List[str]) -> None:
-        subprocess.run(
-            [
-                "opkg",
-                "--conf",
-                str(conf_path),
-                "--offline-root",
-                str(offline_root),
+                "--conf", str(root / "etc/opkg/opkg.conf"),
+                "--offline-root", str(root),
+                "--cache-dir", str(cache_dir),
+                "--host-cache-dir",
                 *args,
             ],
-            check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
 
 
-def _patch_opkg_conf(conf_path: Path, offline_root: Path) -> None:
-    data = conf_path.read_text().splitlines()
-    (offline_root / "var/lib/opkg").mkdir(parents=True, exist_ok=True)
-    overrides = {
-        "option lists_dir": offline_root / "var/lib/opkg/lists",
-        "option info_dir": offline_root / "var/lib/opkg/info",
-        "option status_file": offline_root / "var/lib/opkg/status",
-        "option image_status_file": offline_root / "var/lib/opkg/status.image",
-    }
-    overrides["option lists_dir"].mkdir(parents=True, exist_ok=True)
-    overrides["option info_dir"].mkdir(parents=True, exist_ok=True)
-
-    patched: List[str] = []
-    seen = {key: False for key in overrides}
-    for line in data:
-        for key, target in overrides.items():
-            if line.strip().startswith(key):
-                line = f"{key} {target}"
-                seen[key] = True
-                break
-        patched.append(line)
-
-    for key, target in overrides.items():
-        if not seen[key]:
-            patched.append(f"{key} {target}")
-
-    conf_path.write_text("\n".join(patched) + "\n")
+def _clear_cache() -> None:
+    shutil.rmtree(PREFETCH_CACHE_DIR, ignore_errors=True)
+    shutil.rmtree(PREFETCH_LISTS_DIR, ignore_errors=True)
 
 
-def _write_state(bundle_sha256: str, plan: ReconcilePlan) -> None:
+def _write_state(
+    bundle_sha256: str, image_sha256: str, packages: Sequence[str], missing: Sequence[str]
+) -> None:
     PREFETCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state = {
         "bundle": bundle_sha256,
+        "image_status_sha256": image_sha256,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "reinstall": plan.reinstall,
+        "packages": list(packages),
+        "missing": list(missing),
     }
     PREFETCH_STATE_FILE.write_text(json.dumps(state, indent=2))

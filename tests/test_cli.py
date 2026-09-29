@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -105,7 +106,7 @@ def _stub_install(monkeypatch, config, bundle, installer):
     )
     monkeypatch.setattr(
         "calculinux_update.cli.prefetch_for_bundle",
-        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test", packages=[], missing=[]),
     )
 
 
@@ -167,7 +168,7 @@ def test_cli_install_triggers_run(monkeypatch, tmp_path, mock_root):
     monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: True)
     monkeypatch.setattr(
         "calculinux_update.cli.prefetch_for_bundle",
-        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test", packages=[], missing=[]),
     )
 
     result = runner.invoke(
@@ -206,7 +207,7 @@ def test_cli_install_yes_skips_prompt(monkeypatch, tmp_path, mock_root):
     )
     monkeypatch.setattr(
         "calculinux_update.cli.prefetch_for_bundle",
-        lambda *_, **__: SimpleNamespace(skipped=True, reason="test"),
+        lambda *_, **__: SimpleNamespace(skipped=True, reason="test", packages=[], missing=[]),
     )
 
     def fail_confirm(*_args, **_kwargs):
@@ -287,7 +288,7 @@ def test_cli_install_runs_prefetch(monkeypatch, tmp_path, mock_root):
 
     def fake_prefetch(path, sha, *_args, **_kwargs):
         prefetch_calls.append((str(path), sha))
-        return SimpleNamespace(skipped=False, downloaded=1, planned=1, reason=None)
+        return SimpleNamespace(skipped=False, packages=["pkg"], missing=[], reason=None)
 
     monkeypatch.setattr("calculinux_update.cli.prefetch_for_bundle", fake_prefetch)
 
@@ -330,7 +331,7 @@ def test_cli_install_no_prefetch_flag(monkeypatch, tmp_path, mock_root):
 
     def fake_prefetch(*_args, **_kwargs):
         calls.append(True)
-        return SimpleNamespace(skipped=False, downloaded=1, planned=1)
+        return SimpleNamespace(skipped=False, packages=["pkg"], missing=[], reason=None)
 
     monkeypatch.setattr("calculinux_update.cli.prefetch_for_bundle", fake_prefetch)
 
@@ -410,7 +411,7 @@ def test_cli_install_blocks_before_download_when_min_version_unmet(
     assert "Compatibility check failed" in result.stdout
 
 
-def test_cli_install_skips_min_version_when_current_unknown(
+def test_cli_install_refuses_min_version_when_current_unknown(
     monkeypatch, tmp_path, mock_root
 ):
     config = build_config(tmp_path)
@@ -426,9 +427,15 @@ def test_cli_install_skips_min_version_when_current_unknown(
         app, ["install", "--bundle", "bundle", "--dry-run", "--yes"]
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert not installer.download_calls
+    assert "Install Calculinux 2.0.0 first" in result.stdout
+
+    forced = runner.invoke(
+        app, ["install", "--bundle", "bundle", "--dry-run", "--yes", "--force"]
+    )
+    assert forced.exit_code == 0
     assert installer.download_calls
-    assert "skipping min-version check" in result.stdout
 
 
 def test_install_requires_root(monkeypatch, tmp_path, mock_non_root):
@@ -756,3 +763,135 @@ def test_pick_channel_invalid_then_valid(monkeypatch, tmp_path):
 
     result = _pick_channel(bundles)
     assert result == "Release"  # Second in sorted list
+
+
+# --- update follow-up: status, reconcile, prefetch report, install-check override
+
+
+def test_status_nothing_pending(monkeypatch):
+    monkeypatch.setattr("calculinux_update.cli.hooks.pending_reinstalls", lambda: [])
+    monkeypatch.setattr("calculinux_update.cli.hooks.read_leftovers", lambda: [])
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "No package work pending" in result.stdout
+
+
+def test_status_lists_queue_and_leftovers(monkeypatch):
+    monkeypatch.setattr("calculinux_update.cli.hooks.pending_reinstalls", lambda: ["dosbox-x"])
+    monkeypatch.setattr(
+        "calculinux_update.cli.hooks.read_leftovers", lambda: [("gone", "reinstall")]
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "dosbox-x" in result.stdout and "reconcile" in result.stdout
+    assert "gone (reinstall)" in result.stdout
+
+
+def _fake_reconcile(monkeypatch, **fields):
+    from calculinux_update.hooks import ReconcileResult
+
+    monkeypatch.setattr(
+        "calculinux_update.cli.hooks.reconcile_pending",
+        lambda allow_network=True: ReconcileResult(**fields),
+    )
+    monkeypatch.setattr("calculinux_update.cli.hooks.STATE_DIR", Path("/nonexistent"))
+
+    class NoLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr("calculinux_update.cli.hooks._state_lock", lambda: NoLock())
+
+
+def test_reconcile_done(monkeypatch, mock_root):
+    _fake_reconcile(monkeypatch, reinstalled=["dosbox-x"], removed=["x"])
+    result = runner.invoke(app, ["reconcile"])
+    assert result.exit_code == 0
+    assert "Reinstalled" in result.stdout and "Removed 1" in result.stdout
+
+
+def test_reconcile_waiting_exits_2(monkeypatch, mock_root):
+    _fake_reconcile(monkeypatch, waiting=["dosbox-x"], failed=["gone"])
+    result = runner.invoke(app, ["reconcile"])
+    assert result.exit_code == 2
+    assert "waiting for the network" in result.stdout and "gone" in result.stdout
+
+
+def test_reconcile_nothing_to_do(monkeypatch, mock_root):
+    _fake_reconcile(monkeypatch)
+    result = runner.invoke(app, ["reconcile"])
+    assert result.exit_code == 0 and "Nothing to do" in result.stdout
+
+
+def test_reconcile_requires_root(mock_non_root):
+    assert runner.invoke(app, ["reconcile"]).exit_code == 1
+
+
+def test_install_confirms_when_prefetch_misses(monkeypatch, tmp_path, mock_root):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+    _stub_install(monkeypatch, config, bundle, installer)
+    monkeypatch.setattr(
+        "calculinux_update.cli.prefetch_for_bundle",
+        lambda *_, **__: SimpleNamespace(
+            skipped=False, reason=None, packages=["a", "gone"], missing=["gone"]
+        ),
+    )
+    answers = iter([True, False])  # proceed with install, then decline after the warning
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: next(answers))
+
+    result = runner.invoke(app, ["install", "--bundle", "bundle"])
+
+    assert result.exit_code == 0
+    assert "could not be downloaded" in result.stdout
+    assert "Installation skipped" in result.stdout
+    assert installer.install_calls == []
+
+
+def test_install_force_sets_override_only_during_rauc_install(
+    monkeypatch, tmp_path, mock_root
+):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    flag = tmp_path / "run" / "allow-install-check-override"
+    monkeypatch.setattr("calculinux_update.cli.INSTALL_CHECK_OVERRIDE", flag)
+    seen = []
+
+    class FlagCheckingInstaller(StubInstaller):
+        def run_rauc_install(self, path, **kwargs):
+            seen.append(flag.exists())
+
+    installer = FlagCheckingInstaller(config)
+    _stub_install(monkeypatch, config, bundle, installer)
+    monkeypatch.setattr("calculinux_update.cli.typer.confirm", lambda *_, **__: False)
+
+    result = runner.invoke(app, ["install", "--bundle", "bundle", "--yes", "--force"])
+
+    assert result.exit_code == 0
+    assert seen == [True]
+    assert not flag.exists()
+
+
+def test_bundle_manifest_minimum_is_enforced(monkeypatch, tmp_path, mock_root):
+    config = build_config(tmp_path)
+    bundle = build_bundle(config)
+    installer = StubInstaller(config)
+    _stub_install(monkeypatch, config, bundle, installer)
+    manifest = tmp_path / "bundle-manifest.env"
+    manifest.write_text('CALCULINUX_VERSION="9.0.0"\nMIN_CALCULINUX_VERSION="9.0.0"\n')
+    current = tmp_path / "current.env"
+    current.write_text('CALCULINUX_VERSION="1.0.0"\n')
+    monkeypatch.setattr("calculinux_update.cli.CURRENT_VERSION_MANIFEST", current)
+    monkeypatch.setattr(
+        "calculinux_update.cli.extract_bundle_extras",
+        lambda _path: SimpleNamespace(version_manifest=manifest, cleanup=lambda: None),
+    )
+
+    result = runner.invoke(app, ["install", "--bundle", "bundle", "--yes"])
+
+    assert result.exit_code == 1
+    assert installer.install_calls == []

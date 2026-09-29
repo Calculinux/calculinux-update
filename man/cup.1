@@ -3,7 +3,7 @@
 cup, cup-hook, cup-postreboot \- Calculinux system update tools
 .SH SYNOPSIS
 .B cup
-.RB [ list | download | install ]
+.RB [ list | download | install | status | reconcile ]
 .RI [ options ]
 .br
 .B cup-hook
@@ -20,7 +20,8 @@ Main command\-line interface for browsing, downloading, and installing RAUC upda
 RAUC post\-install handler invoked during bundle installation to perform complete package reconciliation planning. Removes duplicate packages, prunes writable status, and queues pending operations before reboot.
 .TP
 .B cup\-postreboot
-Post\-reboot service that executes pending package operations (reinstalls and upgrades) queued by cup\-hook.
+Post\-reboot service that carries out the package work queued by cup\-hook: removing overlay copies of packages the new image now provides, and reinstalling overlay packages when the release or kernel changed. It never needs the network; reinstalls come from the prefetch cache and anything else waits for
+.BR "cup reconcile" .
 .SS "Bundle Extras"
 Calculinux RAUC bundles include additional metadata beyond the root filesystem image. The
 .B bundle\-extras.tar.gz
@@ -74,14 +75,15 @@ Install a system update bundle.
 .RI [ --yes ]
 .RI [ --dry-run ]
 .RI [ --no-prefetch ]
+.RI [ --force ]
 .PP
 Interactively select and install an update bundle. The installation process:
 .PP
-1. Extracts bundle extras (OPKG configuration and package status)
+1. Checks the bundle's minimum Calculinux version (from the mirror index and from the bundle itself)
 .br
-2. Computes reconciliation plan (packages to reinstall/upgrade)
+2. Works out which overlay packages must be reinstalled for the new image (all of them for a new release, the kernel modules for a new kernel, none otherwise)
 .br
-3. Prefetches packages that will be needed after reboot
+3. Downloads those packages and their dependencies while the system is still online, and asks before continuing if some cannot be fetched
 .br
 4. Invokes RAUC to install the bundle to inactive slot
 .br
@@ -89,7 +91,15 @@ Interactively select and install an update bundle. The installation process:
 .PP
 After reboot, the
 .B cup\-postreboot
-service automatically executes pending package operations using prefetched .ipk files when available, falling back to network download if needed.
+service finishes the package work from the prefetch cache without needing the network.
+.SS "cup status"
+Show package work left over from the last update: packages still waiting to be reinstalled, and packages that could not be reinstalled.
+.SS "cup reconcile"
+Finish the package work an update queued, downloading from the feed as needed. Run it after connecting to the network when
+.B cup status
+or the login message lists waiting packages;
+.B cup\-reconcile.timer
+also retries every 15 minutes. Exits 2 while packages are still waiting for the network.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-channel " " \fICHANNEL\fR
@@ -110,7 +120,12 @@ Specify download destination directory. Only applies to download command. Defaul
 Perform all steps except the actual RAUC installation. Downloads bundle and performs prefetch but stops before invoking RAUC. Useful for testing.
 .TP
 .BR \-\-no\-prefetch
-Skip package prefetch phase. Bundle extras will still be extracted for validation, but packages will not be pre\-downloaded. Post\-reboot reconciliation will require network access to download packages. Use on development machines without OPKG configuration or when network is guaranteed available after reboot.
+Skip package prefetch phase. Bundle extras will still be extracted for validation, but packages will not be pre\-downloaded. Reinstalls needed after the update then wait for
+.BR "cup reconcile" .
+.TP
+.BR \-\-force
+Install even if the bundle requires a newer running Calculinux version. Also allows the bundle's install\-check hook to accept the install (via
+.IR /run/calculinux\-update/allow\-install\-check\-override ).
 .SH CONFIGURATION
 .SS "Configuration File"
 .I /etc/calculinux\-update.toml
@@ -189,75 +204,60 @@ When updating the base image, three problems arise:
 .SS "Reconciliation Phases"
 The update system solves these problems in two phases:
 .TP
-.B Phase 1: Prefetch (optional, before installation)
+.B Phase 1: Prefetch (cup install, before installation)
+When the new image changes the release (codename or Yocto series) or the kernel, overlay packages must be reinstalled from the new feeds.
 .B cup install
-extracts bundle extras and downloads packages that will need reinstalling or upgrading after reboot. Packages are cached in
-.IR /var/cache/calculinux\-update/prefetch/ .
-This enables offline reconciliation. If prefetch is skipped or fails, network access is required after reboot.
+resolves them and their dependencies against the new image and downloads them into
+.IR /var/cache/calculinux\-update/prefetch/ ,
+keeping the feed lists in
+.IR /var/lib/calculinux\-update/prefetch\-lists/ ,
+so the reinstall needs no network after the reboot.
 .TP
 .B Phase 2: Hook (during RAUC installation)
 .B cup\-hook
-is invoked by RAUC's post\-install handler after the bundle is installed. The hook receives the
+is invoked by RAUC's post\-install handler with the new image's
 .I status.image
-file from bundle extras (via
-.B RAUC_BUNDLE_STATUS_IMAGE
-environment variable) and performs complete reconciliation planning:
+(via
+.BR RAUC_BUNDLE_STATUS_IMAGE ).
+It sorts every entry of the writable status file:
 .RS
 .IP 1. 3
-Identifies duplicate packages (present in both overlay and new base image)
+.B Duplicates
+(also in the new image): if files of the package are in the upper layer, the overlay copy is queued for removal after reboot; otherwise only its status entry is dropped now.
 .IP 2.
-Performs two\-phase duplicate removal:
-.RS
-.IP a. 3
-.B Status\-only duplicates:
-Packages with no actual files in upper layer are removed from status file immediately (safe before reboot)
-.IP b.
-.B Physical duplicates:
-Packages with actual files in upper layer are queued for removal after reboot
-.RE
+.B Leaked image entries
+(no files in the upper layer, and either in the current image or without any
+.I .list
+file): copies of image packages opkg wrote to the writable status file. Their entries are dropped.
 .IP 3.
-Cleans up OverlayFS whiteout files for removed packages (see
-.B WHITEOUT CLEANUP
-section)
-.IP 4.
-Cleans up opkg metadata whiteouts in /var/lib/opkg/info/ to expose base image metadata
-.IP 5.
-Identifies packages to reinstall (removed from new base)
-.IP 6.
-Identifies packages to upgrade (writable packages needing version updates)
-.IP 7.
-Writes pending operation files for post\-reboot execution
-.IP 8.
-Sets status\-pruned marker to indicate completion
+.B Overlay packages
+(what the user installed): kept. Queued for reinstall only for a new release, or, for a new kernel, when they are kernel modules.
 .RE
 .IP
-The two\-phase approach prevents temporary library access issues:
-.B status\-only
-duplicates (packages without files in upper layer) are removed immediately since they're safe, while
-.B physical
-duplicates (packages with files in upper layer) are deferred until after reboot when the system has switched to the new slot. All planning happens
-.B before reboot
-while both old and new status files are accessible.
+Upper\-layer state comes from the overlayfs
+.B OVL_IOC_UPPER_STATE
+ioctl. The hook's compatibility check only logs: RAUC has already marked the slot active when the handler runs; the bundle's install\-check hook is what refuses an install.
 .TP
 .B Phase 3: Post\-reboot (after slot switch)
 .B cup\-postreboot
-runs on first boot into new slot (triggered by systemd condition on pending files). It executes the plan created by the hook:
+runs on the first boot into the new slot, without waiting for the network:
 .RS
 .IP 1. 3
-Removes physical duplicate packages queued by hook
+Removes the queued overlay duplicates with one
+.BR "opkg remove" ,
+then removes the whiteouts left over the image's files and metadata
 .IP 2.
-Cleans up whiteout files for newly removed packages
+Reinstalls queued packages from the prefetch cache when it was made for the running image
 .IP 3.
-Updates package feeds (opkg update)
+Otherwise tries the feed; without network the packages stay queued for
+.B cup reconcile
+(retried by
+.BR cup\-reconcile.timer ),
+and a login message says how to finish
 .IP 4.
-Reinstalls missing packages (using cached .ipk files if available)
-.IP 5.
-Upgrades overlay packages to match new base versions
-.IP 6.
-Cleans up pending files and markers
+Packages the feed no longer provides are recorded as leftovers (see
+.BR "cup status" )
 .RE
-.IP
-The post\-reboot service simply executes operations queued by the hook, ensuring complex planning happens before reboot when both status files are accessible.
 .TP
 .B Phase 4: Config File Detection (during RAUC installation)
 After package reconciliation planning,
@@ -437,11 +437,9 @@ calling
 .B opkg remove
 (removal deletes package from database)
 .IP 2.
-After removal, checks each file path for whiteout files (character device 0:0)
+After removal, asks overlayfs (OVL_IOC_UPPER_STATE) which of those paths are whiteouts
 .IP 3.
-Removes whiteout files to expose base image files
-.IP 4.
-Remounts overlay to pick up changes immediately
+Removes them with OVL_IOC_RESTORE_LOWER, which also refreshes the overlay's caches, so no remount is needed
 .RE
 .SS "Metadata Whiteouts"
 .TP
@@ -471,18 +469,16 @@ fail even though package exists in base
 After package removal, the system:
 .RS
 .IP 1. 3
-Scans
-.I /var/lib/opkg/info/
-for
-.I .wh.package.*
-files
+Checks the package's
+.IR /var/lib/opkg/info/ package .*
+paths with OVL_IOC_UPPER_STATE
 .IP 2.
-Verifies they are actual whiteouts (character device 0:0)
+Removes the whiteouts with OVL_IOC_RESTORE_LOWER to expose the base image's metadata
 .IP 3.
-Removes whiteouts to expose base image metadata
-.IP 4.
 Allows opkg queries to work correctly
 .RE
+.PP
+The ioctls come from Calculinux's overlayfs module (https://github.com/Calculinux/overlayfs); a kernel without them makes the hook fail rather than guess.
 .SS "Enhanced opkg Integration"
 The system uses enhanced opkg functionality for proper split\-status file handling:
 .TP
@@ -514,10 +510,22 @@ Current installed package status (writable overlay).
 Base image package status (read\-only, provided by base image).
 .TP
 .I /var/lib/calculinux\-update/update\-state.pending\-reinstalls
-Packages queued for reinstall after reboot (created by cup\-hook).
+Overlay packages queued for reinstall (created by cup\-hook; emptied by cup\-postreboot or cup reconcile).
 .TP
-.I /var/lib/calculinux\-update/update\-state.pending\-upgrades
-Packages queued for upgrade after reboot (created by cup\-hook).
+.I /var/lib/calculinux\-update/update\-state.leftovers
+Packages that could not be reinstalled (shown by cup status).
+.TP
+.I /var/lib/calculinux\-update/prefetch.json
+What the prefetch cache holds and which image it was made for.
+.TP
+.I /var/lib/calculinux\-update/prefetch\-lists/
+Feed lists of the new image, used by the post\-reboot reinstall.
+.TP
+.I /usr/lib/systemd/system/cup\-reconcile.timer
+Retries queued reinstalls every 15 minutes while any are waiting.
+.TP
+.I /etc/profile.d/cup\-pending.sh
+Login message listing waiting reinstalls and how to finish them.
 .TP
 .I /var/lib/calculinux\-update/update\-state.pending\-duplicates
 Physical duplicate packages queued for removal after reboot (created by cup\-hook). These are packages with actual files in the upper layer that must be removed after switching to the new slot.
@@ -657,14 +665,13 @@ cup\-hook: removed 2 status\-only duplicate packages
 cup\-hook: removed 15 package whiteout files
 cup\-hook: removed 8 metadata whiteout files
 cup\-hook: queued 3 physical duplicates for post\-reboot removal
+cup\-hook: release change: 4 overlay package(s) will be reinstalled
 cup\-hook: queued 4 packages for reinstall
-cup\-hook: queued 6 packages for upgrade
 cup\-hook: detected 2 modified config files
 cup\-hook: marked status as pruned for new image
 cup\-postreboot: removing 3 physical duplicate packages
 cup\-postreboot: removed 12 whiteout files
-cup\-postreboot: reinstalling 4 packages from cache
-cup\-postreboot: upgrading 6 packages
+cup\-postreboot: reinstalling 4 package(s) from the prefetch cache
 cup\-postreboot: reconciliation complete
 
 Modified config files detected (user changes shadow new image versions):
@@ -739,7 +746,6 @@ Pending operations are stored in:
 .nf
 .RS
 /var/lib/calculinux\-update/update\-state.pending\-reinstalls
-/var/lib/calculinux\-update/update\-state.pending\-upgrades
 /var/lib/calculinux\-update/update\-state.pending\-duplicates
 .RE
 .fi
@@ -838,13 +844,15 @@ sudo cup install \-\-bundle <bundle\-name>
 .fi
 .TP
 .B "Network unavailable after reboot"
-If prefetch succeeded, reconciliation should work offline using cached packages in
+If prefetch succeeded, reinstalls work offline from
 .IR /var/cache/calculinux\-update/prefetch/ .
-If packages are missing from cache, restore network access and restart the service:
+Anything else waits; the login message and
+.B cup status
+list it. Connect to the network, then run:
 .PP
 .nf
 .RS
-sudo systemctl restart cup\-postreboot.service
+sudo cup reconcile
 .RE
 .fi
 .SH ROLLBACK

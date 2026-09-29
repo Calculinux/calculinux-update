@@ -8,19 +8,31 @@ import fcntl
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .opkg.conffiles import create_dpkg_new_files, detect_modified_conffiles
-from .opkg.overlayfs import get_package_files, restore_files_for_packages
+from .opkg.overlayfs import (
+    OverlayIoctlUnsupported,
+    get_package_files,
+    restore_files_for_packages,
+)
 from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
 )
 from .opkg.status import load_package_names, load_status_entries, write_status_entries
+from .prefetch import (
+    PREFETCH_CACHE_DIR,
+    PREFETCH_LISTS_DIR,
+    file_sha256,
+)
+from .prefetch import load_state as load_prefetch_state
 from .version_compat import check_compatibility, load_version_manifest
 
 LOG = logging.getLogger("calculinux_update.hooks")
@@ -45,7 +57,10 @@ LOCK_FILE = STATE_DIR / ".lock"
 # Update state files (new locations in /var/lib/calculinux-update/)
 PENDING_DUPLICATES_FILE = STATE_DIR / "update-state.pending-duplicates"
 PENDING_REINSTALL_FILE = STATE_DIR / "update-state.pending-reinstalls"
-PENDING_UPGRADE_FILE = STATE_DIR / "update-state.pending-upgrades"
+# Written by calculinux-update < 0.8 (every overlay package, any update)
+LEGACY_PENDING_UPGRADE_FILE = STATE_DIR / "update-state.pending-upgrades"
+LEFTOVERS_FILE = STATE_DIR / "update-state.leftovers"
+OPKG_LISTS_DIR = Path("/var/lib/opkg/lists")
 MODIFIED_CONFFILES_FILE = STATE_DIR / "update-state.modified-conffiles"
 PRE_UPDATE_WRITABLE_STATUS = STATE_DIR / "update-state.pre-update-writable"
 PRE_UPDATE_SLOT_NAME = STATE_DIR / "update-state.pre-update-slot"
@@ -53,8 +68,6 @@ UPDATED_SLOT_NAME = STATE_DIR / "update-state.updated-slot"
 UPDATE_BOOT_ID = STATE_DIR / "update-state.boot-id"
 STATUS_PRUNED_MARKER = STATE_DIR / "status-pruned"
 
-# Cache directory
-PREFETCH_CACHE_DIR = Path("/var/cache/calculinux-update/prefetch")
 
 
 @contextmanager
@@ -222,7 +235,7 @@ def _cleanup_update_state() -> None:
         UPDATE_BOOT_ID,
         PENDING_DUPLICATES_FILE,
         PENDING_REINSTALL_FILE,
-        PENDING_UPGRADE_FILE,
+        LEGACY_PENDING_UPGRADE_FILE,
         STATUS_PRUNED_MARKER,  # Clear pruned marker on new update
     ]
 
@@ -240,6 +253,8 @@ def _save_pre_update_state(updated_slot: str) -> None:
     # Even if there are no pending operations, we need to prune writable status
     STATUS_PRUNED_MARKER.unlink(missing_ok=True)
     LOG.debug("cleared status-pruned marker for new update")
+    # Leftovers belong to the previous update
+    LEFTOVERS_FILE.unlink(missing_ok=True)
 
     # Critical: Record which slot we're updating to
     try:
@@ -425,25 +440,15 @@ def run_slot_hook(hook: str, slot: str) -> None:
         LOG.warning("writable status %s missing", WRITABLE_STATUS)
         return
 
-    bundle_mount = os.environ.get("RAUC_BUNDLE_MOUNT_POINT")
-    bundle_manifest = (
-        Path(bundle_mount) / "extras/version-manifest.env" if bundle_mount else None
-    )
-    if CURRENT_VERSION_MANIFEST.exists() and bundle_manifest and bundle_manifest.exists():
-        try:
-            old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
-            new_manifest = load_version_manifest(bundle_manifest)
-            if old_manifest and new_manifest:
-                report = check_compatibility(old_manifest, new_manifest)
-                for issue in report.issues:
-                    LOG.info("[%s] %s: %s", issue.level.name, issue.category, issue.message)
-                    if issue.recommendation:
-                        LOG.info("  -> %s", issue.recommendation)
-                if report.any_blockers():
-                    LOG.error("update blocked by compatibility check")
-                    raise SystemExit(1)
-        except Exception as e:
-            LOG.warning("version compatibility check failed: %s", e)
+    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+    new_manifest = load_version_manifest(_bundle_manifest_path())
+    # Informational only: RAUC has already marked the slot active by the time
+    # this post-install handler runs, so failing here would not stop the
+    # update. The bundle's install-check hook is what refuses an install.
+    if old_manifest and new_manifest:
+        report = check_compatibility(old_manifest, new_manifest)
+        for issue in report.issues:
+            LOG.info("[%s] %s: %s", issue.level.name, issue.category, issue.message)
 
     # Save pre-update state for rollback detection
     _save_pre_update_state(slot)
@@ -461,30 +466,53 @@ def run_slot_hook(hook: str, slot: str) -> None:
         image_status=image_status,
         writable_status=WRITABLE_STATUS,
         current_status=CURRENT_IMAGE_STATUS,
+        old_manifest=old_manifest,
+        new_manifest=new_manifest,
     )
 
-    # Phase 1: Remove packages from status file that have no files in upper layer
-    # This is safe to do before reboot since there are no physical files to remove
-    if plan.status_only_duplicates:
+    # Entries with no files in the upper layer only need their status entry
+    # dropped, which is safe before the reboot: duplicates the new image
+    # provides, and image packages opkg leaked into the writable status.
+    prune = plan.status_only_duplicates + plan.leaked
+    if prune:
         LOG.info(
-            "pruning %d status-only duplicate(s) (no files in upper layer)",
-            len(plan.status_only_duplicates)
+            "pruning %d status-only duplicate(s) and %d leaked image entr(ies)",
+            len(plan.status_only_duplicates), len(plan.leaked),
         )
-        _prune_status_only_duplicates(plan.status_only_duplicates)
+        prune_writable_status(WRITABLE_STATUS, prune)
 
-    # Phase 2: Physical duplicate removal and overlay upgrades happen after reboot
+    if plan.release_change:
+        LOG.info("release change: %d overlay package(s) will be reinstalled", len(plan.reinstall))
+    elif plan.reinstall:
+        LOG.info(
+            "kernel %s: %d overlay kernel module package(s) will be reinstalled",
+            plan.kernel_abi, len(plan.reinstall),
+        )
+    else:
+        LOG.info("same release and kernel: %d overlay package(s) stay as installed",
+                 len(plan.overlay))
+
+    # Overlay files of duplicates are removed and reinstalls happen after reboot
     _write_pending(PENDING_DUPLICATES_FILE, plan.duplicates, "duplicate removal")
     _write_pending(PENDING_REINSTALL_FILE, plan.reinstall, "reinstall")
-    _write_pending(PENDING_UPGRADE_FILE, plan.upgrade, "upgrade")
-
-    # Conffile .dpkg-new files are created post-reboot from the new lower layer.
+    LEGACY_PENDING_UPGRADE_FILE.unlink(missing_ok=True)
 
     # Marker is informational; systemd starts post-reboot from pending-* files.
     try:
         _atomic_write(STATUS_PRUNED_MARKER, "pruned\n")
-        LOG.info("marked status as pruned for new image")
     except (OSError, IOError) as e:
         LOG.warning("failed to mark status as pruned: %s", e)
+
+
+def _bundle_manifest_path() -> Path:
+    explicit = os.environ.get("RAUC_BUNDLE_VERSION_MANIFEST")
+    if explicit:
+        return Path(explicit)
+    # Older post-install handlers point RAUC_BUNDLE_MOUNT_POINT at the
+    # unpacked extras instead.
+    return Path(os.environ.get("RAUC_BUNDLE_MOUNT_POINT", "/nonexistent")) / (
+        "extras/version-manifest.env"
+    )
 
 
 def postreboot_entrypoint() -> None:
@@ -493,41 +521,24 @@ def postreboot_entrypoint() -> None:
         LOG.error("post-reboot service must run as root")
         raise SystemExit(1)
 
-    # Use locking to prevent concurrent operations
     with _state_lock():
-        # Check for rollback first
         rollback_info = _detect_rollback()
         if rollback_info["is_rollback"]:
             LOG.info("rollback detected: %s", rollback_info["reason"])
             if _handle_rollback():
                 LOG.info("rollback handling complete")
                 return
-            else:
-                LOG.error("rollback handling failed")
-                raise SystemExit(1)
+            LOG.error("rollback handling failed")
+            raise SystemExit(1)
 
-        # Not a rollback - proceed with forward update processing
-        has_pending = (
-            PENDING_DUPLICATES_FILE.exists() or
-            PENDING_REINSTALL_FILE.exists() or
-            PENDING_UPGRADE_FILE.exists()
-        )
+        if LEGACY_PENDING_UPGRADE_FILE.exists():
+            # Older calculinux-update queued every overlay package for an
+            # upgrade from the feed after any update. Same-release overlay
+            # packages keep working, so there is nothing to do for them.
+            LOG.info("dropping upgrade queue from an older calculinux-update")
+            LEGACY_PENDING_UPGRADE_FILE.unlink(missing_ok=True)
 
-        if has_pending:
-            if not _run_opkg(["update"]):
-                LOG.error("opkg update failed; will retry next boot")
-                raise SystemExit(1)
-
-            # Phase 2: Physical duplicates / overlay upgrades after reboot
-            duplicates_status = _process_pending(PENDING_DUPLICATES_FILE, _remove_duplicate_pkg)
-            reinstall_status = _process_pending(PENDING_REINSTALL_FILE, _install_reinstall_pkg)
-            upgrade_status = _process_pending(PENDING_UPGRADE_FILE, _upgrade_pkg)
-            if not (duplicates_status and reinstall_status and upgrade_status):
-                LOG.error("post-reboot reconciliation incomplete; will retry")
-                raise SystemExit(1)
-            LOG.info("post-reboot package reconciliation complete")
-        else:
-            LOG.info("no pending package operations")
+        result = reconcile_pending(allow_network=True)
 
         # Conffiles and cleanup run even when the update queued no packages
         _create_new_conffiles_from_lower()
@@ -549,25 +560,132 @@ def postreboot_entrypoint() -> None:
         ]:
             path.unlink(missing_ok=True)
 
+    if result.waiting:
+        LOG.info(
+            "%d package(s) still need to be reinstalled once the network is up; "
+            "run 'cup reconcile' after connecting",
+            len(result.waiting),
+        )
 
-def _prune_writable_status(image_status: Path) -> None:
-    changed = prune_writable_status(WRITABLE_STATUS, load_package_names(image_status))
-    if changed:
-        LOG.info("pruned writable status against new image")
+
+@dataclass(slots=True)
+class ReconcileResult:
+    removed: List[str] = field(default_factory=list)
+    reinstalled: List[str] = field(default_factory=list)
+    waiting: List[str] = field(default_factory=list)
+    failed: List[str] = field(default_factory=list)
 
 
-def _prune_status_only_duplicates(packages: List[str]) -> None:
-    """Remove packages from writable status that have no files in upper layer.
+def pending_reinstalls() -> List[str]:
+    return _read_pending(PENDING_REINSTALL_FILE)
 
-    This is Phase 1 of duplicate handling - safe to do before reboot since
-    there are no physical files to remove, only status metadata cleanup.
+
+def read_leftovers() -> List[Tuple[str, str]]:
+    try:
+        lines = LEFTOVERS_FILE.read_text().splitlines()
+    except OSError:
+        return []
+    return [tuple(line.split("\t", 1)) for line in lines if "\t" in line]  # type: ignore[misc]
+
+
+def reconcile_pending(allow_network: bool = True) -> ReconcileResult:
+    """Carry out queued duplicate removals and reinstalls.
+
+    Local work comes first and never needs the network. Reinstalls use the
+    prefetch cache when it was made for the running image; otherwise the feed
+    when ``opkg update`` works. Whatever cannot be installed for lack of a
+    network stays queued for the next attempt.
     """
-    if not packages:
-        return
+    result = ReconcileResult()
 
-    changed = prune_writable_status(WRITABLE_STATUS, packages)
-    if changed:
-        LOG.info("pruned %d status-only duplicate(s) from writable status", len(packages))
+    duplicates = _read_pending(PENDING_DUPLICATES_FILE)
+    if duplicates:
+        result.removed, failed = _remove_duplicate_pkgs(duplicates)
+        _write_pending(PENDING_DUPLICATES_FILE, failed, "duplicate removal")
+        result.failed.extend(failed)
+
+    queue = _read_pending(PENDING_REINSTALL_FILE)
+    if not queue:
+        return result
+
+    cache_dir = None
+    prefetched = _install_prefetched_lists()
+    if prefetched:
+        cache_dir = PREFETCH_CACHE_DIR
+        LOG.info("reinstalling %d package(s) from the prefetch cache", len(queue))
+    online = allow_network and _run_opkg(["update"])
+    if not prefetched and not online:
+        LOG.info("no prefetched packages and no network: %d reinstall(s) wait", len(queue))
+        result.waiting = queue
+        return result
+
+    done, failed = _reinstall_pkgs(queue, cache_dir)
+    result.reinstalled = done
+    for pkg in failed:
+        if online:
+            _record_leftover(pkg, "reinstall")
+            result.failed.append(pkg)
+        else:
+            result.waiting.append(pkg)
+    _write_pending(PENDING_REINSTALL_FILE, result.waiting, "reinstall")
+    return result
+
+
+def _install_prefetched_lists() -> bool:
+    """Use the prefetched feed lists if they were made for the running image."""
+    state = load_prefetch_state()
+    if not state or not PREFETCH_LISTS_DIR.is_dir() or not CURRENT_IMAGE_STATUS.exists():
+        return False
+    if state.get("image_status_sha256") != file_sha256(CURRENT_IMAGE_STATUS):
+        LOG.info("prefetch cache is for a different image; ignoring it")
+        return False
+    OPKG_LISTS_DIR.mkdir(parents=True, exist_ok=True)
+    for lst in PREFETCH_LISTS_DIR.iterdir():
+        if lst.is_file():
+            shutil.copyfile(lst, OPKG_LISTS_DIR / lst.name)
+    return True
+
+
+def _reinstall_pkgs(
+    packages: List[str], cache_dir: Optional[Path]
+) -> Tuple[List[str], List[str]]:
+    base = ["--cache-dir", str(cache_dir)] if cache_dir else []
+    if _run_opkg([*base, "install", "--force-reinstall", *packages]):
+        return list(packages), []
+    done, failed = [], []
+    for pkg in packages:
+        if _run_opkg([*base, "install", "--force-reinstall", pkg]):
+            done.append(pkg)
+        else:
+            failed.append(pkg)
+    return done, failed
+
+
+def _remove_duplicate_pkgs(packages: List[str]) -> Tuple[List[str], List[str]]:
+    """``opkg remove`` the overlay copies, then restore the image's files."""
+    # File lists must be read before opkg deletes them
+    file_lists = {pkg: get_package_files(pkg) for pkg in packages}
+    removed: List[str] = []
+    failed: List[str] = []
+    if _run_opkg(["remove", "--nodeps", *packages]):
+        removed = list(packages)
+    else:
+        for pkg in packages:
+            (removed if _run_opkg(["remove", "--nodeps", pkg]) else failed).append(pkg)
+    if removed:
+        try:
+            restored = restore_files_for_packages(
+                removed, file_lists={pkg: file_lists[pkg] for pkg in removed}
+            )
+            LOG.info(
+                "removed %d overlay duplicate(s); restored %d image file(s)",
+                len(removed), restored,
+            )
+        except OverlayIoctlUnsupported:
+            raise
+        except Exception as e:
+            LOG.warning("error during file restoration: %s", e)
+    return removed, failed
 
 
 def _create_new_conffiles_from_lower() -> None:
@@ -629,46 +747,11 @@ def _report_modified_conffiles() -> None:
         LOG.warning("failed to read modified conffiles list: %s", e)
 
 
-def _remove_duplicates(duplicates: Iterable[str]) -> None:
-    removed_packages = []
-    package_files_map = {}
-
-    # Get file lists BEFORE removal since opkg remove will delete the package info
-    for pkg in duplicates:
-        files = get_package_files(pkg)
-        if files:
-            package_files_map[pkg] = files
-
-    for pkg in duplicates:
-        LOG.info("removing duplicate package %s", pkg)
-        result = subprocess.run(
-            ["opkg", "remove", "--nodeps", pkg],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
-        else:
-            removed_packages.append(pkg)
-
-    # Restore lower layer files for successfully removed packages
-    # This ensures files from the base image become visible again
-    if removed_packages:
-        LOG.info(
-            "restoring lower layer files for %d removed packages", len(removed_packages)
-        )
-        try:
-            files_restored = restore_files_for_packages(
-                removed_packages, file_lists=package_files_map
-            )
-            if files_restored > 0:
-                LOG.info(
-                    "restored %d file(s) from base image",
-                    files_restored,
-                )
-        except Exception as e:
-            LOG.warning("error during file restoration: %s", e)
+def _read_pending(path: Path) -> List[str]:
+    try:
+        return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    except OSError:
+        return []
 
 
 def _write_pending(path: Path, packages: List[str], label: str) -> None:
@@ -682,84 +765,13 @@ def _write_pending(path: Path, packages: List[str], label: str) -> None:
     LOG.info("queued %d packages for %s", len(packages), label)
 
 
-def _process_pending(path: Path, handler) -> bool:
-    if not path.exists():
-        return True
-
-    ok = True
-    packages = [line.strip() for line in path.read_text().splitlines() if line.strip()]
-    for pkg in packages:
-        if not handler(pkg):
-            ok = False
-    if ok:
-        path.unlink(missing_ok=True)
-    return ok
-
-
-def _install_reinstall_pkg(pkg: str) -> bool:
-    cached = _find_cached_package(pkg)
-    if cached:
-        LOG.info("reinstalling %s from cache", pkg)
-        result = _run_opkg(["install", "--force-reinstall", str(cached)])
-    else:
-        LOG.info("reinstalling %s from feed", pkg)
-        result = _run_opkg(["install", "--force-reinstall", pkg])
-    if not result:
-        LOG.warning("failed to reinstall %s", pkg)
-    return result
-
-
-def _remove_duplicate_pkg(pkg: str) -> bool:
-    """Remove a single duplicate package (Phase 2 - packages with files in upper).
-
-    This physically removes the package and cleans up any OverlayFS whiteouts.
-    """
-    # Get file list BEFORE removal since opkg remove will delete the package info
-    file_list = get_package_files(pkg)
-
-    LOG.info("removing duplicate package %s from upper layer", pkg)
-    result = subprocess.run(
-        ["opkg", "remove", "--nodeps", pkg],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        LOG.warning("failed to remove %s: %s", pkg, result.stderr.strip())
-        return False
-
-    # Restore lower layer files for the removed package
-    try:
-        file_lists = {pkg: file_list} if file_list else {}
-        files_restored = restore_files_for_packages([pkg], file_lists=file_lists)
-        if files_restored > 0:
-            LOG.info(
-                "restored %d file(s) from base image for %s",
-                files_restored,
-                pkg,
-            )
-    except Exception as e:
-        LOG.warning("error during file restoration for %s: %s", pkg, e)
-
-    return True
-
-
 def _record_leftover(pkg: str, reason: str) -> None:
-    path = STATE_DIR / "update-state.leftovers"
     try:
         _ensure_state_dir()
-        with path.open("a", encoding="utf-8") as fh:
+        with LEFTOVERS_FILE.open("a", encoding="utf-8") as fh:
             fh.write(f"{pkg}\t{reason}\n")
     except (OSError, IOError) as e:
         LOG.warning("failed to record leftover %s: %s", pkg, e)
-
-
-def _upgrade_pkg(pkg: str) -> bool:
-    result = _run_opkg(["upgrade", pkg])
-    if not result:
-        LOG.warning("failed to upgrade %s; leaving installed as-is", pkg)
-        _record_leftover(pkg, "upgrade")
-    return True
 
 
 def _run_opkg(args: List[str]) -> bool:
@@ -770,17 +782,3 @@ def _run_opkg(args: List[str]) -> bool:
         LOG.warning("opkg %s failed: %s", " ".join(args), result.stderr.strip())
         return False
     return True
-
-
-def _find_cached_package(pkg: str) -> Optional[Path]:
-    if not PREFETCH_CACHE_DIR.exists():
-        return None
-    candidates = sorted(
-        PREFETCH_CACHE_DIR.glob(f"{pkg}_*.ipk"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
