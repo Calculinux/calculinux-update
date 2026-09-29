@@ -41,7 +41,7 @@ def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):
     )
 
     # Mock has_files_in_upper to simulate different scenarios
-    def mock_has_files(pkg):
+    def mock_has_files(pkg, overlay=None):
         return pkg in ["pkg-with-files", "pkg-also-with"]
 
     with patch(
