@@ -2,7 +2,7 @@
 Description=Calculinux post-reboot package reconciliation
 # Runs without waiting for the network: duplicate removal and conffiles are
 # local, reinstalls come from the prefetch cache, and anything that needs the
-# feed stays queued for cup-reconcile.timer (or 'cup reconcile').
+# feed stays queued. Users are told at login to run 'cup reconcile'.
 # Hook always writes updated-slot; pending-* only exist when packages need work.
 # OR across these ConditionPathExists so a no-package update still post-processes.
 ConditionPathExists=|/var/lib/calculinux-update/update-state.updated-slot

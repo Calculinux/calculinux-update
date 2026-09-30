@@ -300,7 +300,6 @@ pytest
 ## Roadmap
 
 - Optional daemon mode to watch the mirror for updates.
-- Systemd unit + timer for scheduled checks.
 - Integration with RAUC status reporting.
 
 ## License
