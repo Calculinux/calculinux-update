@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from .overlayfs import has_files_in_upper
+from .overlayfs import OverlayInfo, has_files_in_upper
 from .status import (
     load_package_names,
     load_status_entries,
@@ -70,11 +70,13 @@ def compute_reconcile_plan(
     duplicates = []
     status_only_duplicates = []
 
-    for pkg in all_duplicates:
-        if has_files_in_upper(pkg):
-            duplicates.append(pkg)
-        else:
-            status_only_duplicates.append(pkg)
+    if all_duplicates:
+        with OverlayInfo() as overlay:
+            for pkg in all_duplicates:
+                if has_files_in_upper(pkg, overlay):
+                    duplicates.append(pkg)
+                else:
+                    status_only_duplicates.append(pkg)
 
     # current_status is accepted for API stability but is not used:
     # packages dropped from the new image were image contents, not extra

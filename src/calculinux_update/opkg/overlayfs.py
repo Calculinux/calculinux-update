@@ -1,465 +1,430 @@
-"""Helpers for restoring lower layer files after package removal in OverlayFS.
+"""Overlay upper-layer queries and whiteout restore for package reconciliation.
 
-This module addresses a specific edge case in Calculinux's dual-layer package
-management system:
+Calculinux keeps packages the user installs in the overlayfs upper layer on
+top of a read-only base image. When an update moves such a package into the
+image, its overlay copy is removed with ``opkg remove``. overlayfs then leaves
+a whiteout for every removed file that also exists in the lower layer, which
+hides the image's new copy. The whiteouts are removed again here.
 
-SCENARIO:
-1. User installs a package (e.g., SDL) into the OverlayFS upper layer because it is not present
-   in the base image
-2. New RAUC update includes a version of that package in the base image (lower layer)
-3. During reconciliation, the old overlay package is removed with `opkg remove`
-4. OverlayFS creates whiteout files (char device 0:0) for each removed file that
-   has a corresponding file in the lower layer
-5. These whiteouts persist, blocking access to the newer base image version
+Both the "does this package have files in the upper layer" query and the
+restore use the ioctls of Calculinux's overlayfs module
+(https://github.com/Calculinux/overlayfs, include/uapi/linux/overlayfs.h):
 
-SOLUTION:
-After removing duplicate packages, this module:
-1. Restores opkg metadata files first (enables querying package info from base image)
-2. Uses the OVL_IOC_IS_RESTORABLE ioctl to check which files have whiteouts
-3. Uses the OVL_IOC_RESTORE_LOWER ioctl to remove whiteouts and restore lower layer files
+- ``OVL_IOC_UPPER_STATE`` reports whether the upper layer holds nothing, a
+  whiteout or a real entry for a path;
+- ``OVL_IOC_RESTORE_LOWER`` removes a whiteout so the lower entry shows again.
 
-NOTE: The ioctl automatically invalidates dentries, so no remount is needed.
+The ioctls are issued on the overlay's mount point, opened as a directory.
+A kernel without them (``ENOTTY``) raises :class:`OverlayIoctlUnsupported`;
+there is deliberately no userspace fallback.
 """
 
 from __future__ import annotations
 
+import array
 import errno
 import fcntl
 import logging
+import os
+import stat
 import struct
-import subprocess
-from enum import Enum
+from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
-from typing import List
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from .status import load_package_names
 
 LOGGER = logging.getLogger(__name__)
 
-class FileRestorability(Enum):
-    """Represents the state of a file in an overlay filesystem."""
-    WHITEOUT = "whiteout"  # File has a whiteout in upper layer (restorable)
-    IN_UPPER = "in_upper"  # Real file exists in upper layer (not restorable)
-    IN_LOWER_ONLY = "in_lower_only"  # File only in lower or doesn't exist (not restorable)
-
 __all__ = [
-    "restore_package_files",
+    "OVL_IOC_IS_RESTORABLE",
+    "OVL_IOC_RESTORE_LOWER",
+    "OVL_IOC_UPPER_STATE",
+    "OverlayInfo",
+    "OverlayIoctlUnsupported",
+    "UpperInfo",
+    "UpperState",
+    "find_restorable_files",
+    "get_package_entries",
+    "get_package_files",
+    "has_files_in_upper",
     "restore_files_for_packages",
     "restore_opkg_metadata",
-    "get_package_files",
-    "find_restorable_files",
-    "has_files_in_upper",
+    "restore_package_files",
 ]
 
-def find_overlay_mount_point(path: str) -> str:
+INFO_DIR = Path("/var/lib/opkg/info")
+WRITABLE_STATUS = Path("/var/lib/opkg/status")
+MOUNTINFO = Path("/proc/self/mountinfo")
+
+METADATA_SUFFIXES = (
+    ".list", ".control", ".conffiles", ".preinst", ".postinst", ".prerm", ".postrm",
+)
+
+
+# --- ioctl ABI (include/uapi/linux/overlayfs.h) -----------------------------
+
+_IOC_WRITE = 1
+_IOC_READ = 2
+
+
+def _ioc(direction: int, type_: str, nr: int, size: int) -> int:
+    return (direction << 30) | (size << 16) | (ord(type_) << 8) | nr
+
+
+# The image's Python has no ctypes, so the argument structs are packed with
+# struct and the path's address comes from an array buffer.
+
+# struct ovl_restore_lower_args / ovl_is_restorable_args:
+#   __aligned_u64 path_ptr; __u32 path_len; __u32 flags;
+_PATH_ARGS = struct.Struct("=QII")
+# struct ovl_upper_state_args:
+#   __aligned_u64 path_ptr; __u32 path_len, flags, state, state_flags, mode, pad;
+_UPPER_STATE_ARGS = struct.Struct("=QIIIIII")
+
+OVL_IOC_RESTORE_LOWER = _ioc(_IOC_WRITE, "O", 1, _PATH_ARGS.size)
+OVL_IOC_IS_RESTORABLE = _ioc(_IOC_WRITE, "O", 2, _PATH_ARGS.size)
+OVL_IOC_UPPER_STATE = _ioc(_IOC_READ | _IOC_WRITE, "O", 3, _UPPER_STATE_ARGS.size)
+
+_STATE_F_OPAQUE = 1 << 0
+_STATE_F_NO_LOWER_DIR = 1 << 1
+
+
+class UpperState(IntEnum):
+    NONE = 0       # no upper entry
+    WHITEOUT = 1   # upper entry is a whiteout
+    UPPER = 2      # real upper entry
+
+
+@dataclass(frozen=True)
+class UpperInfo:
+    state: UpperState
+    mode: int = 0
+    opaque: bool = False
+    no_lower_dir: bool = False
+
+
+class OverlayIoctlUnsupported(RuntimeError):
+    """The running kernel's overlayfs lacks the Calculinux ioctls."""
+
+
+def _path_buffer(path: str) -> Tuple[array.array, int, int]:
+    """A NUL-terminated copy of ``path``, its address and its strlen().
+
+    The array must stay referenced until the ioctl returns.
     """
-    Find the overlay mount point for a given file path by parsing /proc/self/mountinfo.
-    Returns the mount point as a string, or '/' if not found.
-    """
-    best_match = None
-    best_len = -1
-    try:
-        with open("/proc/self/mountinfo", "r") as f:
-            for line in f:
-                fields = line.strip().split()
-                if len(fields) < 10:
+    raw = path.encode()
+    buf = array.array("B", raw + b"\0")
+    return buf, buf.buffer_info()[0], len(raw)
+
+
+class OverlayInfo:
+    """Overlay mount points (read once) and one ioctl fd per mount."""
+
+    def __init__(self, mountinfo: Path = MOUNTINFO) -> None:
+        self._mounts = sorted(self._read_mounts(mountinfo), key=len, reverse=True)
+        self._fds: Dict[str, int] = {}
+
+    @staticmethod
+    def _read_mounts(mountinfo: Path) -> List[str]:
+        mounts = []
+        try:
+            for line in mountinfo.read_text().splitlines():
+                left, sep, right = line.partition(" - ")
+                if not sep:
                     continue
-                mount_point = fields[4]
-                fs_type = fields[-3]
-                if fs_type != "overlay":
-                    continue
-                # Find the longest matching mount point prefix
-                if path.startswith(mount_point) and len(mount_point) > best_len:
-                    best_match = mount_point
-                    best_len = len(mount_point)
-    except Exception as e:
-        LOGGER.warning(f"Failed to parse mountinfo: {e}")
-    return best_match if best_match else "/"
+                if right.split(" ", 1)[0] == "overlay":
+                    mounts.append(left.split()[4])
+        except OSError as exc:
+            LOGGER.warning("failed to read %s: %s", mountinfo, exc)
+        return mounts
 
-OVL_IOC_RESTORE_LOWER = 0x400C4F01  # _IOW('O', 1, ...)
-OVL_IOC_IS_RESTORABLE = 0x800C4F02  # _IOR('O', 2, ...)
+    def mount_point(self, path: str) -> Optional[str]:
+        """The overlay mount that contains ``path``, or None."""
+        for mount in self._mounts:
+            if mount == "/" or path == mount or path.startswith(mount + "/"):
+                return mount
+        return None
 
-def check_file_restorability(mount_point: str, path: str) -> FileRestorability:
-    """
-    Check the restorability state of a file in an overlay filesystem.
+    def _fd(self, mount: str) -> int:
+        fd = self._fds.get(mount)
+        if fd is None:
+            fd = os.open(mount, os.O_RDONLY | os.O_DIRECTORY)
+            self._fds[mount] = fd
+        return fd
 
-    Uses the OVL_IOC_IS_RESTORABLE ioctl which returns:
-    - 0: File has a whiteout in upper layer (restorable)
-    - -EINVAL: File exists in upper but is NOT a whiteout (real file)
-    - -ENOENT: File not in upper layer (only in lower or doesn't exist)
+    def upper_state(self, path: str) -> UpperInfo:
+        """What the upper layer holds for ``path`` (NONE when not on an overlay)."""
+        mount = self.mount_point(path)
+        if mount is None:
+            return UpperInfo(UpperState.NONE)
+        path_buf, address, length = _path_buffer(path)
+        args = bytearray(_UPPER_STATE_ARGS.pack(address, length, 0, 0, 0, 0, 0))
+        try:
+            fcntl.ioctl(self._fd(mount), OVL_IOC_UPPER_STATE, args)
+        except OSError as exc:
+            if exc.errno == errno.ENOTTY:
+                raise OverlayIoctlUnsupported(
+                    f"overlayfs on {mount} does not support OVL_IOC_UPPER_STATE"
+                ) from exc
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EXDEV):
+                # parent missing, or the path crosses into another filesystem
+                return UpperInfo(UpperState.NONE)
+            raise
+        del path_buf
+        _ptr, _len, _flags, state, state_flags, mode, _pad = _UPPER_STATE_ARGS.unpack(args)
+        return UpperInfo(
+            state=UpperState(state),
+            mode=mode,
+            opaque=bool(state_flags & _STATE_F_OPAQUE),
+            no_lower_dir=bool(state_flags & _STATE_F_NO_LOWER_DIR),
+        )
 
-    Args:
-        mount_point: Path to the overlay mount point
-        path: Absolute path to the file to check
-
-    Returns:
-        FileRestorability enum indicating the file's state
-    """
-    try:
-        with open(mount_point, 'r') as f:
-            path_bytes = path.encode('utf-8')
-            args = struct.pack('QII', id(path_bytes), len(path_bytes), 0)
-            fcntl.ioctl(f.fileno(), OVL_IOC_IS_RESTORABLE, args)
-        return FileRestorability.WHITEOUT
-    except OSError as e:
-        if e.errno == errno.EINVAL:
-            return FileRestorability.IN_UPPER
-        else:  # ENOENT or other errors
-            return FileRestorability.IN_LOWER_ONLY
-
-def is_file_restorable(mount_point: str, path: str) -> bool:
-    """
-    Check if a file has a whiteout that can be restored using OverlayFS ioctl.
-    Returns True if restorable, False otherwise.
-
-    This is a convenience wrapper around check_file_restorability() for
-    cases where you only need a boolean result.
-    """
-    return check_file_restorability(mount_point, path) == FileRestorability.WHITEOUT
-
-def restore_lower_via_ioctl(mount_point: str, path: str) -> bool:
-    """
-    Restore lower layer file using OverlayFS ioctl.
-    Returns True on success, False on failure.
-    """
-    try:
-        with open(mount_point, 'r') as f:
-            path_bytes = path.encode('utf-8')
-            # Use id(path_bytes) for pointer, but this is only valid for the duration of the call
-            args = struct.pack('QII', id(path_bytes), len(path_bytes), 0)
-            fcntl.ioctl(f.fileno(), OVL_IOC_RESTORE_LOWER, args)
+    def restore_lower(self, path: str) -> bool:
+        """Remove the whiteout at ``path``; True once a lower entry is visible."""
+        mount = self.mount_point(path)
+        if mount is None:
+            return False
+        path_buf, address, length = _path_buffer(path)
+        args = bytearray(_PATH_ARGS.pack(address, length, 0))
+        try:
+            fcntl.ioctl(self._fd(mount), OVL_IOC_RESTORE_LOWER, args)
+        except OSError as exc:
+            if exc.errno == errno.ENOTTY:
+                raise OverlayIoctlUnsupported(
+                    f"overlayfs on {mount} does not support OVL_IOC_RESTORE_LOWER"
+                ) from exc
+            if exc.errno == errno.ENODATA:
+                LOGGER.debug("removed whiteout %s but nothing lower shows through", path)
+            elif exc.errno not in (errno.ENOENT, errno.EEXIST):
+                LOGGER.warning("failed to restore lower for %s: %s", path, exc)
+            return False
+        finally:
+            del path_buf
         return True
-    except OSError as e:
-        LOGGER.warning(f"Failed to restore lower for {path}: {e}")
-        return False
 
-def is_package_in_writable_status(package_name: str) -> bool:
+    def close(self) -> None:
+        for fd in self._fds.values():
+            os.close(fd)
+        self._fds.clear()
+
+    def __enter__(self) -> "OverlayInfo":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+# --- package file lists -------------------------------------------------------
+
+
+def get_package_entries(
+    package_name: str, info_dir: Path = INFO_DIR
+) -> List[Tuple[str, Optional[int]]]:
+    """(path, mode) for every entry in the package's ``.list`` file.
+
+    opkg records installed files in ``<info_dir>/<package>.list`` as
+    ``path<TAB>mode<TAB>link`` (older files have only the path; mode is then
+    None). ``opkg files`` reads the same file, so there is nothing to fall back
+    to when it is missing.
     """
-    Check if a package is in the writable status file.
-
-    Uses opkg's --writable-only flag to properly query only the writable
-    status file, ignoring packages in the base image.
-
-    Args:
-        package_name: Name of the package to check
-
-    Returns:
-        True if package is in writable status, False otherwise
-    """
+    list_file = Path(info_dir) / f"{package_name}.list"
     try:
-        result = subprocess.run(
-            ["opkg", "status", "--writable-only", package_name],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        # Check if package found and installed
-        return result.returncode == 0 and "Status: install ok installed" in result.stdout
-    except (subprocess.SubprocessError, OSError) as e:
-        LOGGER.warning("Failed to check writable status for %s: %s", package_name, e)
-        return False
-
-
-def get_package_files(package_name: str) -> List[str]:
-    """
-    Get list of files that belong to a package using opkg.
-
-    Args:
-        package_name: Name of the package to query
-
-    Returns:
-        List of absolute file paths that belong to the package
-    """
-    try:
-        result = subprocess.run(
-            ["opkg", "files", package_name],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        )
-
-        # opkg files output is one file per line
-        files = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line and not line.startswith("Package ") and line != "Not installed":
-                # Ensure absolute path
-                if not line.startswith('/'):
-                    line = '/' + line
-                files.append(line)
-
-        return files
-
-    except subprocess.CalledProcessError as e:
-        LOGGER.warning("Failed to get file list for package %s: %s", package_name, e)
-        return []
-    except (subprocess.TimeoutExpired, OSError) as e:
-        LOGGER.warning("Error querying opkg for package %s: %s", package_name, e)
+        text = list_file.read_text(errors="replace")
+    except OSError:
+        LOGGER.debug("no file list for package %s", package_name)
         return []
 
+    entries = []
+    for line in text.splitlines():
+        fields = line.split("\t")
+        path = fields[0].strip()
+        if not path:
+            continue
+        if not path.startswith("/"):
+            path = "/" + path
+        mode = None
+        if len(fields) > 1 and fields[1].strip():
+            try:
+                mode = int(fields[1].strip(), 8)
+            except ValueError:
+                mode = None
+        entries.append((path.rstrip("/") or "/", mode))
+    return entries
 
-def find_restorable_files(file_paths: List[str]) -> List[Path]:
+
+def get_package_files(package_name: str, info_dir: Path = INFO_DIR) -> List[str]:
+    """Absolute paths of the files (and directories) a package installed."""
+    return [path for path, _mode in get_package_entries(package_name, info_dir)]
+
+
+def has_files_in_upper(
+    package_name: str,
+    overlay: Optional[OverlayInfo] = None,
+    info_dir: Path = INFO_DIR,
+) -> bool:
+    """True if any non-directory file of the package is a real upper-layer entry.
+
+    Directories are skipped: parents such as /usr exist in the upper layer as
+    soon as anything below them is written. When the state of a file cannot be
+    determined, the package counts as having upper files, which leads to a real
+    ``opkg remove`` rather than only dropping its status entry.
     """
-    Find files that have whiteouts and can be restored.
+    entries = get_package_entries(package_name, info_dir)
+    if not entries:
+        return False
 
-    Uses the OVL_IOC_IS_RESTORABLE ioctl to check each file path
-    to see if it has a whiteout in the overlay upper layer that can be removed.
+    own = overlay is None
+    overlay = overlay or OverlayInfo()
+    try:
+        for path, mode in entries:
+            if mode is not None and stat.S_ISDIR(mode):
+                continue
+            try:
+                info = overlay.upper_state(path)
+            except OverlayIoctlUnsupported:
+                raise
+            except OSError as exc:
+                LOGGER.warning(
+                    "cannot tell whether %s (%s) is in the upper layer: %s",
+                    path, package_name, exc,
+                )
+                return True
+            if info.state == UpperState.UPPER and not stat.S_ISDIR(info.mode):
+                LOGGER.debug("package %s has a real file in upper: %s", package_name, path)
+                return True
+        return False
+    finally:
+        if own:
+            overlay.close()
 
-    Args:
-        file_paths: List of file paths to check for restorability
 
-    Returns:
-        List of Path objects for files that can be restored
-    """
-    restorable = []
+# --- restore --------------------------------------------------------------------
 
-    for file_path in file_paths:
-        path = Path(file_path)
 
-        # Find the overlay mount point for this file
-        mount_point = find_overlay_mount_point(str(path))
+def find_restorable_files(
+    file_paths: Iterable[str], overlay: Optional[OverlayInfo] = None
+) -> List[Path]:
+    """The paths among ``file_paths`` that are whiteouts over a lower directory."""
+    own = overlay is None
+    overlay = overlay or OverlayInfo()
+    try:
+        restorable = []
+        for file_path in file_paths:
+            info = overlay.upper_state(str(file_path))
+            if info.state == UpperState.WHITEOUT and not info.no_lower_dir:
+                restorable.append(Path(file_path))
+        return restorable
+    finally:
+        if own:
+            overlay.close()
 
-        # Check if this file is restorable
-        if is_file_restorable(mount_point, str(path)):
-            LOGGER.debug(f"Found restorable file: {path} (mount: {mount_point})")
-            restorable.append(path)
 
-    return restorable
+def is_package_in_writable_status(
+    package_name: str, writable_status: Path = WRITABLE_STATUS
+) -> bool:
+    """Whether the overlay's own status file still lists the package."""
+    try:
+        return package_name in load_package_names(writable_status)
+    except OSError as exc:
+        LOGGER.warning("failed to read %s: %s", writable_status, exc)
+        return False
 
 
 def restore_package_files(
     package_name: str,
     dry_run: bool = False,
-    file_list: List[str] | None = None,
+    file_list: Optional[List[str]] = None,
+    overlay: Optional[OverlayInfo] = None,
+    info_dir: Path = INFO_DIR,
+    writable_status: Path = WRITABLE_STATUS,
 ) -> int:
+    """Remove the whiteouts a removed package left over lower-layer files.
+
+    Call after ``opkg remove``. Pass the file list captured before the removal,
+    or restore the package's metadata first so the image's ``.list`` shows.
+
+    Returns the number of files restored (or that would be, with dry_run).
     """
-    Restore lower layer files for a removed package by removing overlay whiteouts.
-
-    This function should be called after removing a package from the overlay
-    that was shadowing files in the base image. It finds and restores files
-    that have been hidden by whiteouts.
-
-    IMPORTANT: After `opkg remove`, the package is no longer in opkg's database,
-    so `opkg files` will return nothing. Either call this BEFORE removal, or
-    provide the file_list explicitly.
-
-    Args:
-        package_name: Name of the package that was removed
-        dry_run: If True, only report what would be restored without restoring
-        file_list: Optional pre-fetched list of files for the package. If None,
-            will attempt to get from opkg (which only works if package still exists
-            in opkg's database, or after metadata has been restored).
-
-    Returns:
-        Number of files restored (or that would be restored in dry_run)
-    """
-    # Check if the package is still in the writable status file
-    if is_package_in_writable_status(package_name):
-        LOGGER.debug(
-            "Package %s is still in writable status, skipping restoration",
-            package_name,
-        )
+    if is_package_in_writable_status(package_name, writable_status):
+        LOGGER.debug("package %s is still installed in the overlay, skipping", package_name)
         return 0
 
-    # Get the file list for the package
-    if file_list is not None:
-        file_paths = file_list
-    else:
-        # Try to get from opkg - this works if package metadata has been restored
-        file_paths = get_package_files(package_name)
-
+    file_paths = file_list if file_list is not None else get_package_files(
+        package_name, info_dir
+    )
     if not file_paths:
-        LOGGER.debug("No file list found for package %s", package_name)
+        LOGGER.debug("no file list found for package %s", package_name)
         return 0
 
-    LOGGER.debug("Checking %d files for restoration from package %s",
-                 len(file_paths), package_name)
-
-    # Find restorable files (files with whiteouts)
-    restorable_files = find_restorable_files(file_paths)
-
-    if not restorable_files:
-        LOGGER.debug("No restorable files found for package %s", package_name)
-        return 0
-
-    # Restore the files using direct ioctl
-    restored_count = 0
-    for file_path in restorable_files:
+    own = overlay is None
+    overlay = overlay or OverlayInfo()
+    try:
+        restorable = find_restorable_files(file_paths, overlay)
         if dry_run:
-            LOGGER.info("Would restore lower for: %s", file_path)
-            restored_count += 1
-        else:
-            mount_point = find_overlay_mount_point(str(file_path))
-            if restore_lower_via_ioctl(mount_point=mount_point, path=str(file_path)):
-                LOGGER.info(f"Restored lower layer for: {file_path} (mount: {mount_point})")
-                restored_count += 1
-    if restored_count > 0:
-        action = "Would restore" if dry_run else "Restored"
-        LOGGER.info(
-            "%s lower layer for %d file(s) for package %s",
-            action, restored_count, package_name
-        )
-    return restored_count
+            for path in restorable:
+                LOGGER.info("would restore lower for: %s", path)
+            return len(restorable)
+        restored = sum(1 for path in restorable if overlay.restore_lower(str(path)))
+    finally:
+        if own:
+            overlay.close()
+
+    if restored:
+        LOGGER.info("restored %d lower-layer file(s) for package %s", restored, package_name)
+    return restored
 
 
 def restore_opkg_metadata(
-    package_name: str, info_dir: str = "/var/lib/opkg/info", dry_run: bool = False
+    package_name: str,
+    info_dir: Path = INFO_DIR,
+    dry_run: bool = False,
+    overlay: Optional[OverlayInfo] = None,
 ) -> int:
+    """Remove whiteouts over the image's opkg metadata for a removed package.
+
+    ``opkg remove`` deletes ``<package>.list``, ``.control`` and friends, which
+    whites out the base image's copies and hides the package from opkg even
+    though the image still ships it.
     """
-    Restore opkg metadata files for a package by removing overlay whiteouts.
-
-    When opkg removes a package from the upper layer, it deletes the metadata files
-    in /var/lib/opkg/info/ (e.g., package.list, package.control). OverlayFS then
-    creates whiteouts that hide the base image's metadata files, preventing
-    queries like 'opkg files package' from working even though the package exists
-    in status.image.
-
-    This function uses the IS_RESTORABLE ioctl to find and restore those files.
-
-    Args:
-        package_name: Name of the package whose metadata should be restored
-        info_dir: Directory containing opkg metadata (default: /var/lib/opkg/info)
-        dry_run: If True, only report what would be restored without restoring
-
-    Returns:
-        Number of metadata files restored (or that would be restored in dry_run)
-    """
-    info_path = Path(info_dir)
-    if not info_path.exists():
-        LOGGER.debug("Info directory %s does not exist", info_dir)
-        return 0
-
-    restored_count = 0
-
-    # Build list of expected metadata files for this package
-    metadata_files = [
-        info_path / f"{package_name}.list",
-        info_path / f"{package_name}.control",
-        info_path / f"{package_name}.conffiles",
-        info_path / f"{package_name}.preinst",
-        info_path / f"{package_name}.postinst",
-        info_path / f"{package_name}.prerm",
-        info_path / f"{package_name}.postrm",
-    ]
-
-    # Find the overlay mount point for the info directory
-    mount_point = find_overlay_mount_point(str(info_path))
-
-    # Check each metadata file to see if it's restorable
-    for metadata_file in metadata_files:
+    paths = [str(Path(info_dir) / f"{package_name}{suffix}") for suffix in METADATA_SUFFIXES]
+    own = overlay is None
+    overlay = overlay or OverlayInfo()
+    try:
+        restorable = find_restorable_files(paths, overlay)
         if dry_run:
-            # In dry run, just check if restorable
-            if is_file_restorable(mount_point, str(metadata_file)):
-                LOGGER.info(f"Would restore metadata: {metadata_file}")
-                restored_count += 1
-        else:
-            # Try to restore the file
-            if is_file_restorable(mount_point, str(metadata_file)):
-                if restore_lower_via_ioctl(mount_point=mount_point, path=str(metadata_file)):
-                    LOGGER.info(f"Restored metadata: {metadata_file} (mount: {mount_point})")
-                    restored_count += 1
-
-    if restored_count > 0:
-        action = "Would restore" if dry_run else "Restored"
-        LOGGER.info(
-            "%s %d metadata file(s) for package %s",
-            action,
-            restored_count,
-            package_name,
-        )
-
-    return restored_count
-
-
-def has_files_in_upper(package_name: str) -> bool:
-    """
-    Check if a package has any actual files present in the upper layer.
-
-    This is used to distinguish between:
-    1. Packages that exist in status file but have no files in upper layer
-       (safe to remove from status file only)
-    2. Packages that have actual files in upper layer
-       (need physical removal with opkg remove + restoration)
-
-    Uses the OVL_IOC_IS_RESTORABLE ioctl to determine file state:
-    - WHITEOUT: File has whiteout in upper (not a real file)
-    - IN_UPPER: Real file exists in upper layer (what we're looking for)
-    - IN_LOWER_ONLY: File only in lower or doesn't exist (not in upper)
-
-    Args:
-        package_name: Name of the package to check
-
-    Returns:
-        True if the package has any regular files or directories in upper layer,
-        False if only has whiteouts or no files at all
-    """
-    file_paths = get_package_files(package_name)
-
-    if not file_paths:
-        LOGGER.debug("No file list found for package %s", package_name)
-        return False
-
-    # Check if any of the package's files exist as real files in upper layer
-    for file_path in file_paths:
-        path = Path(file_path)
-        mount_point = find_overlay_mount_point(str(path))
-
-        try:
-            restorability = check_file_restorability(mount_point, str(path))
-
-            if restorability == FileRestorability.IN_UPPER:
-                # Real file exists in upper layer
-                LOGGER.debug("Package %s has real file in upper: %s", package_name, path)
-                return True
-            # WHITEOUT and IN_LOWER_ONLY are both "not in upper", continue checking
-        except (OSError, FileNotFoundError):
-            # File can't be accessed - continue checking others
-            continue
-
-    LOGGER.debug("Package %s has no real files in upper layer", package_name)
-    return False
+            return len(restorable)
+        restored = sum(1 for path in restorable if overlay.restore_lower(str(path)))
+    finally:
+        if own:
+            overlay.close()
+    if restored:
+        LOGGER.info("restored %d metadata file(s) for package %s", restored, package_name)
+    return restored
 
 
 def restore_files_for_packages(
-    package_names: List[str],
+    package_names: Iterable[str],
     dry_run: bool = False,
-    file_lists: dict[str, List[str]] | None = None,
+    file_lists: Optional[Dict[str, List[str]]] = None,
 ) -> int:
+    """Restore metadata and files for several removed packages.
+
+    Metadata goes first so the image's file list is readable when no list was
+    captured before the removal.
     """
-    Restore lower layer files for multiple removed packages by removing overlay whiteouts.
-
-    Args:
-        package_names: List of package names that were removed
-        dry_run: If True, only report what would be restored without restoring
-        file_lists: Optional dict mapping package names to their file lists.
-            Should be fetched BEFORE calling opkg remove since removal deletes
-            the package from opkg's database.
-
-    Returns:
-        Total number of files restored across all packages
-    """
-    total_restored = 0
-
-    for package_name in package_names:
-        try:
-            # IMPORTANT: Restore metadata FIRST so we can query package files from base image
-            # Restore opkg metadata to expose base image's .list, .control, etc.
-            metadata_restored = restore_opkg_metadata(package_name, dry_run=dry_run)
-            total_restored += metadata_restored
-
-            # Now that metadata is restored, we can get the file list from the base image
-            # Restore package files
-            file_list = file_lists.get(package_name) if file_lists else None
-            restored = restore_package_files(
-                package_name, dry_run=dry_run, file_list=file_list
-            )
-            total_restored += restored
-
-        except Exception as e:
-            LOGGER.error(
-                "Error restoring files for package %s: %s",
-                package_name,
-                e,
-            )
-
-    # No need to remount overlayfs; ioctl handles dentry invalidation
-    return total_restored
+    total = 0
+    with OverlayInfo() as overlay:
+        for package_name in package_names:
+            try:
+                total += restore_opkg_metadata(package_name, dry_run=dry_run, overlay=overlay)
+                file_list = file_lists.get(package_name) if file_lists else None
+                total += restore_package_files(
+                    package_name, dry_run=dry_run, file_list=file_list, overlay=overlay
+                )
+            except OverlayIoctlUnsupported:
+                raise
+            except Exception as exc:
+                LOGGER.error("error restoring files for package %s: %s", package_name, exc)
+    return total
