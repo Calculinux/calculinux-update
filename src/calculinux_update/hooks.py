@@ -515,6 +515,26 @@ def _bundle_manifest_path() -> Path:
     )
 
 
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+
+def _cleanup_retired_units() -> None:
+    """Drop enablement left behind by images that shipped cup-reconcile.timer.
+
+    /etc survives slot swaps, so an image that enabled the retired timer
+    would otherwise leave dangling symlinks (systemd warns at every boot).
+    """
+    for unit in ("cup-reconcile.timer", "cup-reconcile.service"):
+        for path in (
+            SYSTEMD_SYSTEM_DIR / "multi-user.target.wants" / unit,
+            SYSTEMD_SYSTEM_DIR / unit,
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def postreboot_entrypoint() -> None:
     """Post-reboot reconciliation entry point - requires root."""
     if os.geteuid() != 0:
@@ -522,6 +542,7 @@ def postreboot_entrypoint() -> None:
         raise SystemExit(1)
 
     with _state_lock():
+        _cleanup_retired_units()
         rollback_info = _detect_rollback()
         if rollback_info["is_rollback"]:
             LOG.info("rollback detected: %s", rollback_info["reason"])
@@ -538,7 +559,9 @@ def postreboot_entrypoint() -> None:
             LOG.info("dropping upgrade queue from an older calculinux-update")
             LEGACY_PENDING_UPGRADE_FILE.unlink(missing_ok=True)
 
-        result = reconcile_pending(allow_network=True)
+        # Local work only: prefetched reinstalls, duplicates, conffiles.
+        # Never touch the feed here - leftovers wait for 'cup reconcile'.
+        result = reconcile_pending(allow_network=False)
 
         # Conffiles and cleanup run even when the update queued no packages
         _create_new_conffiles_from_lower()
@@ -563,7 +586,7 @@ def postreboot_entrypoint() -> None:
     if result.waiting:
         LOG.info(
             "%d package(s) still need to be reinstalled once the network is up; "
-            "run 'cup reconcile' after connecting",
+            "the login notice asks users to run 'cup reconcile'",
             len(result.waiting),
         )
 
@@ -593,8 +616,8 @@ def reconcile_pending(allow_network: bool = True) -> ReconcileResult:
 
     Local work comes first and never needs the network. Reinstalls use the
     prefetch cache when it was made for the running image; otherwise the feed
-    when ``opkg update`` works. Whatever cannot be installed for lack of a
-    network stays queued for the next attempt.
+    when ``opkg update`` works. Whatever cannot be installed stays queued for
+    ``cup reconcile``, which users are pointed to at login.
     """
     result = ReconcileResult()
 
@@ -615,7 +638,7 @@ def reconcile_pending(allow_network: bool = True) -> ReconcileResult:
         LOG.info("reinstalling %d package(s) from the prefetch cache", len(queue))
     online = allow_network and _run_opkg(["update"])
     if not prefetched and not online:
-        LOG.info("no prefetched packages and no network: %d reinstall(s) wait", len(queue))
+        LOG.info("%d reinstall(s) wait for the feed", len(queue))
         result.waiting = queue
         return result
 

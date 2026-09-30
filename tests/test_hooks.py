@@ -291,6 +291,38 @@ def test_postreboot_drops_legacy_queue_and_cleans_up(monkeypatch, state):
     assert state.update_boot_id.read_text() == "boot-1\n"
 
 
+def test_postreboot_never_touches_the_feed(monkeypatch, state):
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    state.updated_slot_name.write_text("rootfs.1\n")
+    state.pending_reinstall_file.write_text("dosbox-x\n")
+    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": ""})
+    monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "boot-1")
+    monkeypatch.setattr(hooks, "load_prefetch_state", lambda: {})
+    opkg = Opkg(update=True)
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+    monkeypatch.setattr(hooks, "_create_new_conffiles_from_lower", lambda: None)
+    monkeypatch.setattr(hooks, "_report_modified_conffiles", lambda: None)
+
+    hooks.postreboot_entrypoint()
+
+    assert opkg.calls == []  # post-reboot is offline by design
+    assert hooks.pending_reinstalls() == ["dosbox-x"]
+
+
+def test_cleanup_retired_units_removes_enablement(monkeypatch, state, tmp_path):
+    system = tmp_path / "system"
+    wants = system / "multi-user.target.wants"
+    wants.mkdir(parents=True)
+    (wants / "cup-reconcile.timer").touch()
+    (system / "cup-reconcile.service").touch()
+    monkeypatch.setattr(hooks, "SYSTEMD_SYSTEM_DIR", system)
+
+    hooks._cleanup_retired_units()
+
+    assert not (wants / "cup-reconcile.timer").exists()
+    assert not (system / "cup-reconcile.service").exists()
+
+
 def test_postreboot_succeeds_while_packages_wait(monkeypatch, state, caplog):
     caplog.set_level("INFO", logger="calculinux_update.hooks")
     monkeypatch.setattr("os.geteuid", lambda: 0)

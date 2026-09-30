@@ -97,9 +97,7 @@ Show package work left over from the last update: packages still waiting to be r
 .SS "cup reconcile"
 Finish the package work an update queued, downloading from the feed as needed. Run it after connecting to the network when
 .B cup status
-or the login message lists waiting packages;
-.B cup\-reconcile.timer
-also retries every 15 minutes. Exits 2 while packages are still waiting for the network.
+or the login message lists waiting packages. Exits 2 while packages are still waiting for the network.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-channel " " \fICHANNEL\fR
@@ -249,11 +247,10 @@ then removes the whiteouts left over the image's files and metadata
 .IP 2.
 Reinstalls queued packages from the prefetch cache when it was made for the running image
 .IP 3.
-Otherwise tries the feed; without network the packages stay queued for
+Without a usable feed the packages stay queued, and a login message tells
+users to run
 .B cup reconcile
-(retried by
-.BR cup\-reconcile.timer ),
-and a login message says how to finish
+once the network is up
 .IP 4.
 Packages the feed no longer provides are recorded as leftovers (see
 .BR "cup status" )
@@ -520,9 +517,6 @@ What the prefetch cache holds and which image it was made for.
 .TP
 .I /var/lib/calculinux\-update/prefetch\-lists/
 Feed lists of the new image, used by the post\-reboot reinstall.
-.TP
-.I /usr/lib/systemd/system/cup\-reconcile.timer
-Retries queued reinstalls every 15 minutes while any are waiting.
 .TP
 .I /etc/profile.d/cup\-pending.sh
 Login message listing waiting reinstalls and how to finish them.
