@@ -1,0 +1,11 @@
+[Unit]
+Description=Finish Calculinux package reinstalls once the network is up
+ConditionPathExists=/var/lib/calculinux-update/update-state.pending-reinstalls
+Wants=network-online.target
+After=network-online.target cup-postreboot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/cup reconcile
+# 2: packages are still waiting for the network; the timer tries again
+SuccessExitStatus=2

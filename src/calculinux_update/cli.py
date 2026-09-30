@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from . import hooks
+from .bundle import BundleExtractionError, extract_bundle_extras
 from .config import UpdateConfig, load_config
 from .installer import UpdateInstaller
 from .mirror import BundleInfo, MirrorClient
@@ -23,6 +25,9 @@ console = Console()
 
 
 CURRENT_VERSION_MANIFEST = Path("/var/lib/calculinux/version-manifest.env")
+# The bundle's install-check hook allows an otherwise refused install while
+# this exists (cup install --force creates it around the rauc install).
+INSTALL_CHECK_OVERRIDE = Path("/run/calculinux-update/allow-install-check-override")
 
 
 def _require_root(operation: str) -> None:
@@ -63,10 +68,7 @@ def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> None:
         return
     old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
     if not old_manifest.get("CALCULINUX_VERSION", "").strip():
-        console.print(
-            "[yellow]Current Calculinux version is unknown; skipping min-version check.[/]",
-            highlight=False,
-        )
+        _refuse_unknown_version(minimum, force=force)
         return
     _report_compat_issues(
         old_manifest,
@@ -77,6 +79,64 @@ def _enforce_min_from_index(bundle: BundleInfo, *, force: bool) -> None:
         },
         force=force,
     )
+
+
+def _refuse_unknown_version(minimum: str, *, force: bool) -> None:
+    console.print(
+        f"[yellow]This update requires Calculinux {minimum} or newer, but the running "
+        "version is unknown.[/]",
+        highlight=False,
+    )
+    if not force:
+        console.print(
+            f"Install Calculinux {minimum} first, or re-run with --force.", highlight=False
+        )
+        raise typer.Exit(1)
+
+
+def _enforce_min_from_bundle(bundle_path: Path, *, force: bool) -> None:
+    """Check the downloaded bundle's own version manifest against this system."""
+    try:
+        extras = extract_bundle_extras(bundle_path)
+    except (BundleExtractionError, OSError) as exc:
+        console.print(f"[yellow]Could not read the bundle's version manifest:[/] {exc}")
+        return
+    if not extras:
+        return
+    try:
+        if not extras.version_manifest:
+            return
+        new_manifest = load_version_manifest(Path(extras.version_manifest))
+    finally:
+        extras.cleanup()
+    minimum = new_manifest.get("MIN_CALCULINUX_VERSION", "").strip()
+    old_manifest = load_version_manifest(CURRENT_VERSION_MANIFEST)
+    if minimum and not old_manifest.get("CALCULINUX_VERSION", "").strip():
+        _refuse_unknown_version(minimum, force=force)
+        return
+    if old_manifest:
+        _report_compat_issues(old_manifest, new_manifest, force=force)
+
+
+def _report_prefetch(result, *, assume_yes: bool) -> None:
+    """Tell the user what could not be downloaded ahead of the update."""
+    if result.missing:
+        console.print(
+            f"[yellow]{len(result.missing)} of {len(result.packages)} package(s) to "
+            "reinstall after the update could not be downloaded now:[/] "
+            + ", ".join(result.missing),
+            highlight=False,
+        )
+        console.print(
+            "They will be installed from the feed once the device is online after the "
+            "update (cup reconcile), unless the new release no longer ships them.",
+            highlight=False,
+        )
+        if not assume_yes and not typer.confirm("Continue with the update?", default=True):
+            console.print("[yellow]Installation skipped[/]")
+            raise typer.Exit()
+    elif result.skipped and result.reason:
+        console.print(f"[cyan]Prefetch:[/] {result.reason}", highlight=False)
 
 
 def _display_bundles(bundles: List[BundleInfo], show_index: bool = False) -> None:
@@ -444,21 +504,31 @@ def install(
         console.print("[yellow]Installation skipped[/]")
         raise typer.Exit()
 
+    _enforce_min_from_bundle(result.path, force=force)
+
     if prefetch and not dry_run:
         console.print("[cyan]Prefetching post-reboot packages[/]", highlight=False)
         try:
             result_prefetch = prefetch_for_bundle(result.path, result.sha256, console)
-            if result_prefetch.skipped and result_prefetch.reason:
-                console.print(f"[yellow]Prefetch skipped:[/] {result_prefetch.reason}")
         except PrefetchError as exc:
             console.print(f"[red]Prefetch failed:[/] {exc}")
+        else:
+            _report_prefetch(result_prefetch, assume_yes=assume_yes)
 
-    installer.run_rauc_install(
-        result.path,
-        rauc_binary=rauc_binary,
-        sudo=sudo,
-        dry_run=dry_run,
-    )
+    override = force and not dry_run
+    if override:
+        INSTALL_CHECK_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+        INSTALL_CHECK_OVERRIDE.write_text("cup install --force\n")
+    try:
+        installer.run_rauc_install(
+            result.path,
+            rauc_binary=rauc_binary,
+            sudo=sudo,
+            dry_run=dry_run,
+        )
+    finally:
+        if override:
+            INSTALL_CHECK_OVERRIDE.unlink(missing_ok=True)
 
     # Prompt to reboot after successful installation
     if not dry_run:
@@ -485,6 +555,62 @@ def install(
                     )
             else:
                 console.print("[yellow]Remember to reboot when ready to activate the new system[/]")
+
+
+@app.command()
+def status():
+    """Show package work left over from the last update."""
+    queued = hooks.pending_reinstalls()
+    leftovers = hooks.read_leftovers()
+    if not queued and not leftovers:
+        console.print("[green]No package work pending from the last update.[/]")
+        return
+    if queued:
+        console.print(
+            f"[yellow]{len(queued)} package(s) waiting to be reinstalled[/] "
+            "(connect to the network, then run 'cup reconcile'):",
+            highlight=False,
+        )
+        for pkg in queued:
+            console.print(f"  {pkg}", highlight=False)
+    if leftovers:
+        console.print(
+            f"[red]{len(leftovers)} package(s) could not be reinstalled[/] "
+            "(no longer in the feed, or failed to install):",
+            highlight=False,
+        )
+        for pkg, reason in leftovers:
+            console.print(f"  {pkg} ({reason})", highlight=False)
+
+
+@app.command()
+def reconcile():
+    """Finish package reinstalls an update queued (needs the network).
+
+    Exits 2 while packages are still waiting for the network.
+    """
+    _require_root("Reconciling packages")
+    with hooks._state_lock():
+        result = hooks.reconcile_pending(allow_network=True)
+    if result.removed:
+        console.print(f"Removed {len(result.removed)} overlay duplicate(s)", highlight=False)
+    if result.reinstalled:
+        console.print(
+            f"[green]Reinstalled[/] {len(result.reinstalled)} package(s)", highlight=False
+        )
+    if result.failed:
+        console.print(
+            f"[red]{len(result.failed)} package(s) failed:[/] " + ", ".join(result.failed),
+            highlight=False,
+        )
+    if result.waiting:
+        console.print(
+            f"[yellow]{len(result.waiting)} package(s) still waiting for the network[/]",
+            highlight=False,
+        )
+        raise typer.Exit(2)
+    if not (result.removed or result.reinstalled or result.failed):
+        console.print("[green]Nothing to do.[/]")
 
 
 if __name__ == "__main__":

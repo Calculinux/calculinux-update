@@ -1,7 +1,13 @@
 from pathlib import Path
-from unittest.mock import patch
+
+import pytest
 
 from calculinux_update.opkg import reconcile
+
+KABI_OLD = "6.1.99-rockchip-standard"
+KABI_NEW = "6.1.118-rockchip-standard"
+SAME = {"CALCULINUX_CODENAME": "walnascar", "YOCTO_VERSION": "walnascar"}
+NEXT = {"CALCULINUX_CODENAME": "wrynose", "YOCTO_VERSION": "wrynose"}
 
 
 def write_status(path: Path, packages):
@@ -9,73 +15,139 @@ def write_status(path: Path, packages):
     path.write_text("\n".join(chunks) + "\n")
 
 
-def test_compute_reconcile_plan(tmp_path):
-    """Test basic reconcile plan computation without upper layer detection."""
-    image_status = tmp_path / "image"
-    writable_status = tmp_path / "writable"
-    current_status = tmp_path / "current"
-    write_status(image_status, ["base", "keep"])
-    write_status(writable_status, ["base", "overlay"])
-    write_status(current_status, ["missing", "keep"])
+@pytest.fixture
+def upper(monkeypatch):
+    """Packages listed here have files in the upper layer."""
+    with_files = set()
+    monkeypatch.setattr(
+        reconcile, "has_files_in_upper", lambda pkg, overlay=None: pkg in with_files
+    )
 
-    # Mock has_files_in_upper to return True for all packages
-    with patch("calculinux_update.opkg.reconcile.has_files_in_upper", return_value=True):
-        plan = reconcile.compute_reconcile_plan(
-            image_status, writable_status, current_status=current_status
-        )
+    class NoOverlay:
+        def __enter__(self):
+            return self
 
-    assert plan.duplicates == ["base"]
-    assert plan.status_only_duplicates == []
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(reconcile, "OverlayInfo", NoOverlay)
+    return with_files
+
+
+@pytest.fixture
+def statuses(tmp_path):
+    new_image = tmp_path / "new"
+    writable = tmp_path / "writable"
+    current = tmp_path / "current"
+    write_status(new_image, ["base", "moved-in", "busybox", f"kernel-{KABI_OLD}"])
+    write_status(current, ["base", "busybox", "dropped", "user-upgraded", f"kernel-{KABI_OLD}"])
+    write_status(
+        writable,
+        [
+            "moved-in",          # user installed, now in the image, files in upper
+            "busybox",           # image entry leaked into writable status
+            "dropped",           # image entry leaked; the new image dropped it
+            "user-upgraded",     # image package the user upgraded in the overlay
+            "dosbox-x",          # user installed, not in any image
+            f"kernel-module-rtw89-core-{KABI_OLD}",
+        ],
+    )
+    info = tmp_path / "info"
+    info.mkdir()
+    # Real installs have a .list file (possibly empty); leaked entries do not.
+    for pkg in ["moved-in", "user-upgraded", "dosbox-x", f"kernel-module-rtw89-core-{KABI_OLD}"]:
+        (info / f"{pkg}.list").write_text("")
+    return new_image, writable, current, info
+
+
+def plan_for(statuses, **kwargs):
+    new_image, writable, current, info = statuses
+    return reconcile.compute_reconcile_plan(
+        new_image, writable, current_status=current, info_dir=info, **kwargs
+    )
+
+
+def test_same_release_same_kernel_reinstalls_nothing(statuses, upper):
+    upper.update({"moved-in", "user-upgraded", "dosbox-x"})
+    plan = plan_for(statuses, old_manifest=SAME, new_manifest=SAME)
+
+    assert plan.duplicates == ["moved-in"]
+    assert plan.status_only_duplicates == ["busybox"]
+    assert plan.leaked == ["dropped"]
+    assert plan.overlay == [
+        "dosbox-x", f"kernel-module-rtw89-core-{KABI_OLD}", "user-upgraded"
+    ]
     assert plan.reinstall == []
-    assert plan.upgrade == ["overlay"]
+    assert not plan.release_change
+    assert plan.kernel_abi == KABI_OLD
     assert plan.any_actions()
 
 
-def test_compute_reconcile_plan_with_status_only_duplicates(tmp_path):
-    """Test reconcile plan splits duplicates based on upper layer files."""
-    image_status = tmp_path / "image"
-    writable_status = tmp_path / "writable"
-    write_status(image_status, ["pkg-with-files", "pkg-without-files", "pkg-also-with"])
-    write_status(
-        writable_status, ["pkg-with-files", "pkg-without-files", "pkg-also-with", "local-only"]
-    )
+def test_release_change_reinstalls_all_overlay_packages(statuses, upper):
+    upper.update({"user-upgraded"})
+    plan = plan_for(statuses, old_manifest=SAME, new_manifest=NEXT)
 
-    # Mock has_files_in_upper to simulate different scenarios
-    def mock_has_files(pkg, overlay=None):
-        return pkg in ["pkg-with-files", "pkg-also-with"]
-
-    with patch(
-        "calculinux_update.opkg.reconcile.has_files_in_upper", side_effect=mock_has_files
-    ):
-        plan = reconcile.compute_reconcile_plan(image_status, writable_status)
-
-    # Packages with files in upper go to duplicates (need physical removal)
-    assert sorted(plan.duplicates) == ["pkg-also-with", "pkg-with-files"]
-    # Packages without files in upper go to status_only_duplicates (safe status pruning)
-    assert plan.status_only_duplicates == ["pkg-without-files"]
-    assert plan.reinstall == []
-    assert plan.upgrade == ["local-only"]
+    assert plan.release_change
+    assert plan.reinstall == plan.overlay
+    assert "dropped" not in plan.reinstall
 
 
-def test_compute_reconcile_plan_all_status_only(tmp_path):
-    """Test when all duplicates have no files in upper layer."""
-    image_status = tmp_path / "image"
-    writable_status = tmp_path / "writable"
-    write_status(image_status, ["pkg1", "pkg2"])
-    write_status(writable_status, ["pkg1", "pkg2", "local"])
+def test_kernel_change_reinstalls_only_kernel_modules(statuses, upper):
+    new_image = statuses[0]
+    write_status(new_image, ["base", f"kernel-{KABI_NEW}"])
+    plan = plan_for(statuses, old_manifest=SAME, new_manifest=SAME)
 
-    # All packages have no files in upper
-    with patch("calculinux_update.opkg.reconcile.has_files_in_upper", return_value=False):
-        plan = reconcile.compute_reconcile_plan(image_status, writable_status)
+    assert plan.kernel_abi == KABI_NEW
+    assert plan.reinstall == [f"kernel-module-rtw89-core-{KABI_OLD}"]
 
-    assert plan.duplicates == []
-    assert sorted(plan.status_only_duplicates) == ["pkg1", "pkg2"]
-    assert plan.upgrade == ["local"]
+
+def test_without_current_status_only_listless_entries_leak(statuses, upper):
+    new_image, writable, _current, info = statuses
+    (info / "dropped.list").write_text("")
+    plan = reconcile.compute_reconcile_plan(new_image, writable, info_dir=info)
+    assert plan.leaked == []
+    assert "dropped" in plan.overlay
+
+
+def test_entry_without_list_or_files_is_leaked(statuses, upper):
+    """Left over from an earlier image: not in the current one, no metadata."""
+    new_image, writable, current, info = statuses
+    write_status(current, ["base", f"kernel-{KABI_OLD}"])
+    upper.update({"moved-in", "user-upgraded", "dosbox-x"})
+    plan = plan_for(statuses)
+    assert "dropped" in plan.leaked
+    assert f"kernel-module-rtw89-core-{KABI_OLD}" in plan.overlay
+
+
+def test_skipping_duplicate_classification(statuses, upper):
+    plan = plan_for(statuses, classify_duplicates=False)
+    assert plan.duplicates == [] and plan.status_only_duplicates == []
+    assert plan.leaked == ["dropped", "user-upgraded"]
+
+
+@pytest.mark.parametrize(
+    "old,new,expected",
+    [
+        (SAME, SAME, False),
+        (SAME, NEXT, True),
+        ({"CALCULINUX_CODENAME": "walnascar"}, {"CALCULINUX_CODENAME": ""}, False),
+        ({}, NEXT, False),
+        ({"YOCTO_VERSION": "a"}, {"YOCTO_VERSION": "b"}, True),
+    ],
+)
+def test_is_release_change(old, new, expected):
+    assert reconcile.is_release_change(old, new) is expected
+
+
+def test_image_kernel_abi():
+    assert reconcile.image_kernel_abi(["kernel-image-6.1", f"kernel-{KABI_OLD}", "x"]) == KABI_OLD
+    assert reconcile.image_kernel_abi(["kernel-module-foo", "busybox"]) is None
 
 
 def test_prune_writable_status(tmp_path):
     writable = tmp_path / "writable"
-    write_status(writable, ["keep", "drop"])
-    changed = reconcile.prune_writable_status(writable, ["drop"])
-    assert changed
-    assert "drop" not in writable.read_text()
+    write_status(writable, ["keep", "drop", "gone"])
+    assert reconcile.prune_writable_status(writable, ["drop", "gone"])
+    text = writable.read_text()
+    assert "drop" not in text and "gone" not in text and "keep" in text
+    assert not reconcile.prune_writable_status(writable, ["absent"])

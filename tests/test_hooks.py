@@ -7,106 +7,109 @@ import calculinux_update.hooks as hooks
 from calculinux_update.opkg.reconcile import ReconcilePlan
 
 
-def test_find_cached_package(tmp_path, monkeypatch):
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    file_old = cache / "foo_1.ipk"
-    file_old.write_text("old")
-    file_new = cache / "foo_2.ipk"
-    file_new.write_text("new")
-    monkeypatch.setattr(hooks, "PREFETCH_CACHE_DIR", cache)
-    cached = hooks._find_cached_package("foo")
-    # Should find a cached package matching the name
-    assert cached is not None
-    assert "foo" in cached.name
-    assert cached.name.endswith(".ipk")
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """Point every hooks path at tmp_path; returns a namespace of them."""
+    d = tmp_path / "state"
+    d.mkdir()
+    paths = {
+        "STATE_DIR": d,
+        "PENDING_DUPLICATES_FILE": d / "pending-duplicates",
+        "PENDING_REINSTALL_FILE": d / "pending-reinstalls",
+        "LEGACY_PENDING_UPGRADE_FILE": d / "pending-upgrades",
+        "LEFTOVERS_FILE": d / "leftovers",
+        "UPDATED_SLOT_NAME": d / "updated-slot",
+        "PRE_UPDATE_SLOT_NAME": d / "pre-update-slot",
+        "PRE_UPDATE_WRITABLE_STATUS": d / "pre-update-writable",
+        "MODIFIED_CONFFILES_FILE": d / "conffiles",
+        "UPDATE_BOOT_ID": d / "boot-id",
+        "STATUS_PRUNED_MARKER": d / "status-pruned",
+        "PREFETCH_CACHE_DIR": tmp_path / "cache",
+        "PREFETCH_LISTS_DIR": tmp_path / "prefetch-lists",
+        "OPKG_LISTS_DIR": tmp_path / "opkg-lists",
+        "CURRENT_IMAGE_STATUS": tmp_path / "status.image",
+        "WRITABLE_STATUS": tmp_path / "status",
+        "CURRENT_VERSION_MANIFEST": tmp_path / "version-manifest.env",
+    }
+    for name, value in paths.items():
+        monkeypatch.setattr(hooks, name, value)
+    paths["CURRENT_IMAGE_STATUS"].write_text("Package: base\nVersion: 1\n\n")
+    return type("State", (), {k.lower(): v for k, v in paths.items()})
 
 
-def test_process_pending(tmp_path):
-    path = tmp_path / "pending"
-    path.write_text("a\n b\n")
-    seen = []
+class Opkg:
+    """Fake _run_opkg: ``fail`` names packages whose commands fail."""
 
-    def handler(pkg):
-        seen.append(pkg)
-        return True
+    def __init__(self, update=True, fail=()):
+        self.calls = []
+        self.update = update
+        self.fail = set(fail)
 
-    assert hooks._process_pending(path, handler)
-    assert seen == ["a", "b"]
-    assert not path.exists()
-
-
-def test_process_pending_failure(tmp_path):
-    path = tmp_path / "pending"
-    path.write_text("foo\n")
-
-    def handler(_):
-        return False
-
-    assert not hooks._process_pending(path, handler)
-    assert path.exists()
+    def __call__(self, args):
+        self.calls.append(list(args))
+        if args == ["update"]:
+            return self.update
+        return not any(a in self.fail for a in args)
 
 
-def test_run_slot_hook(monkeypatch, tmp_path):
-    writable = tmp_path / "status"
-    writable.write_text("Package: overlay\n\n")
-    monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable)
-
-    current = tmp_path / "current"
-    current.write_text("Package: current\n\n")
-    monkeypatch.setattr(hooks, "CURRENT_IMAGE_STATUS", current)
-
-    # Mock state directory and files for rollback tracking
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    monkeypatch.setattr(hooks, "STATE_DIR", state_dir)
-    monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", state_dir / "updated-slot")
-    monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", state_dir / "pre-update-slot")
-    monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-update-writable")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "pending-reinstalls")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "pending-upgrades")
-    monkeypatch.setattr(hooks, "STATUS_PRUNED_MARKER", state_dir / "status-pruned")
-
-    mount = tmp_path / "slot"
-    (mount / "var/lib/opkg").mkdir(parents=True)
-    bundle_status_image = mount / "var/lib/opkg/status.image"
+def test_run_slot_hook(monkeypatch, tmp_path, state):
+    state.writable_status.write_text("Package: overlay\n\n")
+    state.legacy_pending_upgrade_file.write_text("stale\n")
+    bundle_status_image = tmp_path / "bundle-status.image"
     bundle_status_image.write_text("Package: base\n\n")
+    manifest = tmp_path / "new-manifest.env"
+    manifest.write_text('CALCULINUX_VERSION="9.0.0"\nMIN_CALCULINUX_VERSION="9.0.0"\n')
+    state.current_version_manifest.write_text('CALCULINUX_VERSION="1.0.0"\n')
 
     monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
     monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status_image))
+    monkeypatch.setenv("RAUC_BUNDLE_VERSION_MANIFEST", str(manifest))
+    monkeypatch.setattr(hooks, "_get_booted_slot_name", lambda: "rootfs.1")
 
-    def _must_not_prune_all(*_args, **_kwargs):
-        raise AssertionError("must not prune all writable packages before computing the plan")
-
-    monkeypatch.setattr(hooks, "_prune_writable_status", _must_not_prune_all)
-
+    seen = {}
     plan = ReconcilePlan(
-        duplicates=["base"],
-        status_only_duplicates=["status-only"],
-        reinstall=["foo"],
-        upgrade=["bar"]
+        duplicates=["moved-in"],
+        status_only_duplicates=["busybox"],
+        leaked=["dropped"],
+        overlay=["dosbox-x"],
+        reinstall=["dosbox-x"],
+        release_change=True,
     )
-    monkeypatch.setattr(hooks, "compute_reconcile_plan", lambda **_: plan)
 
-    recorded = {"duplicates": None, "reinstall": None, "upgrade": None, "status_only": None}
+    def fake_plan(**kwargs):
+        seen["plan_kwargs"] = kwargs
+        return plan
 
-    def fake_prune_status_only(pkgs):
-        recorded["status_only"] = pkgs
+    monkeypatch.setattr(hooks, "compute_reconcile_plan", fake_plan)
+    monkeypatch.setattr(
+        hooks, "prune_writable_status", lambda path, pkgs: seen.setdefault("pruned", pkgs)
+    )
 
-    def fake_write(path, packages, label):
-        recorded[label] = list(packages)
-
-    monkeypatch.setattr(hooks, "_prune_status_only_duplicates", fake_prune_status_only)
-    monkeypatch.setattr(hooks, "_write_pending", fake_write)
-
+    # A failed minimum-version check is only logged: the slot is already active.
     hooks.run_slot_hook("slot-post-install", "rootfs.0")
 
-    # Phase 1: status-only duplicates should be pruned
-    assert recorded["status_only"] == ["status-only"]
-    # Phase 2: physical duplicates should be queued for post-reboot
-    assert recorded["duplicate removal"] == ["base"]
-    assert recorded["reinstall"] == ["foo"]
-    assert recorded["upgrade"] == ["bar"]
+    assert seen["plan_kwargs"]["new_manifest"]["MIN_CALCULINUX_VERSION"] == "9.0.0"
+    assert seen["plan_kwargs"]["old_manifest"]["CALCULINUX_VERSION"] == "1.0.0"
+    assert seen["pruned"] == ["busybox", "dropped"]
+    assert state.pending_duplicates_file.read_text() == "moved-in\n"
+    assert state.pending_reinstall_file.read_text() == "dosbox-x\n"
+    assert not state.legacy_pending_upgrade_file.exists()
+    assert state.updated_slot_name.read_text() == "rootfs.0\n"
+
+
+def test_run_slot_hook_same_release_queues_no_reinstalls(monkeypatch, tmp_path, state):
+    state.writable_status.write_text("Package: overlay\n\n")
+    bundle_status_image = tmp_path / "bundle-status.image"
+    bundle_status_image.write_text("Package: base\n\n")
+    monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
+    monkeypatch.setenv("RAUC_BUNDLE_STATUS_IMAGE", str(bundle_status_image))
+    monkeypatch.setattr(hooks, "_get_booted_slot_name", lambda: "rootfs.1")
+    monkeypatch.setattr(
+        hooks, "compute_reconcile_plan", lambda **_: ReconcilePlan(overlay=["dosbox-x"])
+    )
+    hooks.run_slot_hook("slot-post-install", "rootfs.0")
+    assert not state.pending_reinstall_file.exists()
+    assert not state.pending_duplicates_file.exists()
 
 
 def test_run_slot_hook_non_post_install(monkeypatch):
@@ -126,14 +129,6 @@ def test_run_slot_hook_missing_mount_point(monkeypatch, caplog):
     assert "not provided" in caplog.text
 
 
-def test_run_slot_hook_missing_image_status(monkeypatch, tmp_path, caplog):
-    caplog.set_level("WARNING", logger="calculinux_update.hooks")
-    monkeypatch.setenv("RAUC_SLOT_CLASS", "rootfs")
-    # Don't set RAUC_BUNDLE_STATUS_IMAGE - this simulates bundle without extras
-    hooks.run_slot_hook("slot-post-install", "slot")
-    assert "not provided" in caplog.text
-
-
 def test_run_slot_hook_missing_writable_status(monkeypatch, tmp_path, caplog):
     caplog.set_level("WARNING", logger="calculinux_update.hooks")
     bundle_status = tmp_path / "status.image"
@@ -145,155 +140,171 @@ def test_run_slot_hook_missing_writable_status(monkeypatch, tmp_path, caplog):
     assert "writable status" in caplog.text
 
 
-def test_postreboot_entrypoint(monkeypatch, tmp_path):
-    monkeypatch.setattr("os.geteuid", lambda: 0)  # Mock root check
-    rein = tmp_path / "reinstall"
-    rein.write_text("foo\n")
-    upg = tmp_path / "upgrade"
-    upg.write_text("bar\n")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", rein)
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", upg)
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
+def test_bundle_manifest_path(monkeypatch):
+    monkeypatch.delenv("RAUC_BUNDLE_VERSION_MANIFEST", raising=False)
+    monkeypatch.setenv("RAUC_BUNDLE_MOUNT_POINT", "/tmp/extras")
+    assert hooks._bundle_manifest_path() == Path("/tmp/extras/extras/version-manifest.env")
+    monkeypatch.setenv("RAUC_BUNDLE_VERSION_MANIFEST", "/x/manifest.env")
+    assert hooks._bundle_manifest_path() == Path("/x/manifest.env")
 
-    # Mock rollback detection to return "not a rollback"
-    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
 
-    calls = []
+# --- reconcile_pending ---------------------------------------------------------
 
-    monkeypatch.setattr(hooks, "_run_opkg", lambda args: True)
+
+def test_duplicates_removed_in_one_batch_then_restored(monkeypatch, state):
+    state.pending_duplicates_file.write_text("a\nb\n")
+    opkg = Opkg()
+    restored = {}
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [f"/usr/bin/{pkg}"])
     monkeypatch.setattr(
-        hooks, "_install_reinstall_pkg", lambda pkg: calls.append(("install", pkg)) or True
+        hooks,
+        "restore_files_for_packages",
+        lambda pkgs, file_lists: restored.update(file_lists) or len(pkgs),
     )
-    monkeypatch.setattr(
-        hooks, "_upgrade_pkg", lambda pkg: calls.append(("upgrade", pkg)) or True
-    )
 
-    hooks.postreboot_entrypoint()
-    assert calls == [("install", "foo"), ("upgrade", "bar")]
-    assert not rein.exists()
-    assert not upg.exists()
+    result = hooks.reconcile_pending()
+
+    assert opkg.calls == [["remove", "--nodeps", "a", "b"]]
+    assert restored == {"a": ["/usr/bin/a"], "b": ["/usr/bin/b"]}
+    assert result.removed == ["a", "b"]
+    assert not state.pending_duplicates_file.exists()
 
 
-def test_postreboot_entrypoint_no_pending_still_cleans_up(monkeypatch, tmp_path):
-    """An update with no package ops still creates conffiles and clears state."""
+def test_duplicate_removal_falls_back_per_package(monkeypatch, state):
+    state.pending_duplicates_file.write_text("good\nbad\n")
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg(fail={"bad"}))
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
+    monkeypatch.setattr(hooks, "restore_files_for_packages", lambda pkgs, file_lists: 0)
+
+    result = hooks.reconcile_pending()
+
+    assert result.removed == ["good"]
+    assert result.failed == ["bad"]
+    assert state.pending_duplicates_file.read_text() == "bad\n"
+
+
+def _prefetched(monkeypatch, state, image_sha=None):
+    state.prefetch_lists_dir.mkdir()
+    (state.prefetch_lists_dir / "main").write_text("Package: dosbox-x\n")
+    sha = image_sha or hooks.file_sha256(state.current_image_status)
+    monkeypatch.setattr(hooks, "load_prefetch_state", lambda: {"image_status_sha256": sha})
+
+
+def test_reinstalls_from_prefetch_cache_offline(monkeypatch, state):
+    state.pending_reinstall_file.write_text("dosbox-x\nrtw89\n")
+    _prefetched(monkeypatch, state)
+    opkg = Opkg(update=False)
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+
+    result = hooks.reconcile_pending()
+
+    assert (state.opkg_lists_dir / "main").read_text() == "Package: dosbox-x\n"
+    assert [
+        "--cache-dir", str(state.prefetch_cache_dir),
+        "install", "--force-reinstall", "dosbox-x", "rtw89",
+    ] in opkg.calls
+    assert result.reinstalled == ["dosbox-x", "rtw89"]
+    assert result.waiting == []
+    assert not state.pending_reinstall_file.exists()
+
+
+def test_prefetch_for_another_image_is_ignored(monkeypatch, state):
+    state.pending_reinstall_file.write_text("dosbox-x\n")
+    _prefetched(monkeypatch, state, image_sha="0" * 64)
+    opkg = Opkg(update=False)
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+
+    result = hooks.reconcile_pending()
+
+    assert opkg.calls == [["update"]]
+    assert result.waiting == ["dosbox-x"]
+    assert state.pending_reinstall_file.read_text() == "dosbox-x\n"
+    assert not state.opkg_lists_dir.exists()
+
+
+def test_offline_without_prefetch_keeps_queue(monkeypatch, state):
+    state.pending_reinstall_file.write_text("dosbox-x\n")
+    monkeypatch.setattr(hooks, "load_prefetch_state", lambda: {})
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg(update=False))
+    result = hooks.reconcile_pending()
+    assert result.waiting == ["dosbox-x"]
+    assert state.pending_reinstall_file.exists()
+
+
+def test_online_failures_become_leftovers(monkeypatch, state):
+    state.pending_reinstall_file.write_text("dosbox-x\ngone\n")
+    monkeypatch.setattr(hooks, "load_prefetch_state", lambda: {})
+    opkg = Opkg(update=True, fail={"gone"})
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+
+    result = hooks.reconcile_pending()
+
+    assert opkg.calls[0] == ["update"]
+    assert result.reinstalled == ["dosbox-x"]
+    assert result.failed == ["gone"]
+    assert hooks.read_leftovers() == [("gone", "reinstall")]
+    assert not state.pending_reinstall_file.exists()
+
+
+def test_offline_failures_with_prefetch_keep_waiting(monkeypatch, state):
+    state.pending_reinstall_file.write_text("dosbox-x\nnot-prefetched\n")
+    _prefetched(monkeypatch, state)
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg(update=False, fail={"not-prefetched"}))
+
+    result = hooks.reconcile_pending()
+
+    assert result.reinstalled == ["dosbox-x"]
+    assert result.waiting == ["not-prefetched"]
+    assert hooks.pending_reinstalls() == ["not-prefetched"]
+
+
+def test_nothing_queued_runs_no_opkg(monkeypatch, state):
+    opkg = Opkg()
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+    result = hooks.reconcile_pending()
+    assert opkg.calls == []
+    assert not (result.removed or result.reinstalled or result.waiting or result.failed)
+
+
+# --- postreboot_entrypoint -----------------------------------------------------
+
+
+def test_postreboot_drops_legacy_queue_and_cleans_up(monkeypatch, state):
     monkeypatch.setattr("os.geteuid", lambda: 0)
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(hooks, "PENDING_DUPLICATES_FILE", tmp_path / "pending-duplicates")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", tmp_path / "pending-reinstalls")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "pending-upgrades")
-    updated = tmp_path / "updated-slot"
-    updated.write_text("rootfs.1\n")
-    monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", updated)
-    monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", tmp_path / "pre-status")
-    monkeypatch.setattr(hooks, "PRE_UPDATE_SLOT_NAME", tmp_path / "pre-slot")
-    monkeypatch.setattr(hooks, "MODIFIED_CONFFILES_FILE", tmp_path / "conffiles")
-    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
+    state.legacy_pending_upgrade_file.write_text("dosbox-x\n")
+    state.updated_slot_name.write_text("rootfs.1\n")
+    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": ""})
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "boot-1")
-    monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "boot-id")
-
-    opkg_calls = []
-    conffile_called = []
-
-    def mark_create():
-        conffile_called.append("create")
-
-    def mark_report():
-        conffile_called.append("report")
-
-    monkeypatch.setattr(hooks, "_run_opkg", lambda args: opkg_calls.append(args) or True)
-    monkeypatch.setattr(hooks, "_create_new_conffiles_from_lower", mark_create)
-    monkeypatch.setattr(hooks, "_report_modified_conffiles", mark_report)
+    opkg = Opkg()
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+    conffiles = []
+    monkeypatch.setattr(hooks, "_create_new_conffiles_from_lower", lambda: conffiles.append(1))
+    monkeypatch.setattr(hooks, "_report_modified_conffiles", lambda: conffiles.append(2))
 
     hooks.postreboot_entrypoint()
-    assert opkg_calls == []
-    assert conffile_called == ["create", "report"]
-    assert not updated.exists()
-    assert (tmp_path / "boot-id").read_text() == "boot-1\n"
+
+    assert opkg.calls == []  # no network needed
+    assert not state.legacy_pending_upgrade_file.exists()
+    assert conffiles == [1, 2]
+    assert not state.updated_slot_name.exists()
+    assert state.update_boot_id.read_text() == "boot-1\n"
 
 
-def test_postreboot_entrypoint_update_failure(monkeypatch, tmp_path):
-    monkeypatch.setattr("os.geteuid", lambda: 0)  # Mock root check
-    rein = tmp_path / "reinstall"
-    rein.write_text("foo\n")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", rein)
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "none")
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
-    monkeypatch.setattr(hooks, "_run_opkg", lambda args: False)
+def test_postreboot_succeeds_while_packages_wait(monkeypatch, state, caplog):
+    caplog.set_level("INFO", logger="calculinux_update.hooks")
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    state.pending_reinstall_file.write_text("dosbox-x\n")
+    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": ""})
+    monkeypatch.setattr(hooks, "load_prefetch_state", lambda: {})
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg(update=False))
+    monkeypatch.setattr(hooks, "_create_new_conffiles_from_lower", lambda: None)
+    monkeypatch.setattr(hooks, "_report_modified_conffiles", lambda: None)
 
-    try:
-        hooks.postreboot_entrypoint()
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("expected SystemExit")
+    hooks.postreboot_entrypoint()  # no SystemExit
 
-
-def test_postreboot_entrypoint_partial_failure(monkeypatch, tmp_path):
-    monkeypatch.setattr("os.geteuid", lambda: 0)  # Mock root check
-    rein = tmp_path / "reinstall"
-    rein.write_text("foo\n")
-    monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", rein)
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "none")
-    monkeypatch.setattr(hooks, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(hooks, "_detect_rollback", lambda: {"is_rollback": False, "reason": "test"})
-    monkeypatch.setattr(hooks, "_run_opkg", lambda args: True)
-    monkeypatch.setattr(hooks, "_install_reinstall_pkg", lambda pkg: False)
-    with pytest.raises(SystemExit):
-        hooks.postreboot_entrypoint()
-    assert rein.exists()
-
-
-def test_install_reinstall_pkg_prefers_cache(monkeypatch, tmp_path):
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    cached_ipk = cache / "foo_1.ipk"
-    cached_ipk.write_text("data")
-    monkeypatch.setattr(hooks, "PREFETCH_CACHE_DIR", cache)
-
-    captured = {}
-
-    def fake_run(args):
-        captured["args"] = args
-        return True
-
-    monkeypatch.setattr(hooks, "_run_opkg", fake_run)
-    assert hooks._install_reinstall_pkg("foo")
-    # Should use cached .ipk file when available
-    assert any(".ipk" in str(arg) for arg in captured["args"])
-    assert any("foo" in str(arg) for arg in captured["args"])
-
-
-def test_install_reinstall_pkg_failure(monkeypatch):
-    monkeypatch.setattr(hooks, "PREFETCH_CACHE_DIR", Path("/nonexistent"))
-    calls = []
-
-    def fake_run(args):
-        calls.append(args)
-        return False
-
-    monkeypatch.setattr(hooks, "_run_opkg", fake_run)
-    assert not hooks._install_reinstall_pkg("foo")
-    assert calls[-1][-1] == "foo"
-
-
-def test_upgrade_pkg_failure(monkeypatch):
-    captured = []
-
-    def fake_run(args):
-        captured.append(args)
-        return False
-
-    leftovers = []
-
-    def fake_leftover(pkg, reason):
-        leftovers.append((pkg, reason))
-
-    monkeypatch.setattr(hooks, "_run_opkg", fake_run)
-    monkeypatch.setattr(hooks, "_record_leftover", fake_leftover)
-    assert hooks._upgrade_pkg("bar") is True
-    assert captured == [["upgrade", "bar"]]
-    assert leftovers == [("bar", "upgrade")]
+    assert state.pending_reinstall_file.exists()
+    assert "cup reconcile" in caplog.text
 
 
 def test_write_pending_no_packages(tmp_path):
@@ -305,56 +316,8 @@ def test_write_pending_no_packages(tmp_path):
 
 def test_write_pending_with_packages(tmp_path):
     path = tmp_path / "pending"
-    hooks._write_pending(path, ["foo", "bar"], "upgrade")
-    assert path.read_text().strip().splitlines() == ["foo", "bar"]
-
-
-def test_remove_duplicates_handles_failures(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **_):
-        pkg = cmd[-1]
-        calls.append(pkg)
-        if pkg == "good":
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
-        return SimpleNamespace(returncode=1, stderr="boom", stdout="")
-
-    monkeypatch.setattr(hooks.subprocess, "run", fake_run)
-    # Mock get_package_files to return empty list (simulating no files found)
-    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
-    # Mock restore_files_for_packages to accept the new parameter
-    monkeypatch.setattr(
-        hooks, "restore_files_for_packages", lambda packages, **kwargs: len(packages)
-    )
-    hooks._remove_duplicates(["good", "bad"])
-    assert calls == ["good", "bad"]
-
-
-def test_prune_writable_status_logs(monkeypatch, caplog, tmp_path):
-    caplog.set_level("INFO", logger="calculinux_update.hooks")
-    writable = tmp_path / "status"
-    monkeypatch.setattr(hooks, "WRITABLE_STATUS", writable)
-
-    def fake_load(path):
-        assert path == tmp_path / "image"
-        return {"foo"}
-
-    def fake_prune(path, names):
-        assert path == writable
-        assert names == {"foo"}
-        return True
-
-    monkeypatch.setattr(hooks, "load_package_names", fake_load)
-    monkeypatch.setattr(hooks, "prune_writable_status", fake_prune)
-    hooks._prune_writable_status(tmp_path / "image")
-    assert "pruned writable status" in caplog.text
-
-
-def test_prune_writable_status_noop(monkeypatch, tmp_path):
-    monkeypatch.setattr(hooks, "WRITABLE_STATUS", tmp_path / "status")
-    monkeypatch.setattr(hooks, "load_package_names", lambda _: {"foo"})
-    monkeypatch.setattr(hooks, "prune_writable_status", lambda *args: False)
-    hooks._prune_writable_status(tmp_path / "image")
+    hooks._write_pending(path, ["foo", "bar"], "reinstall")
+    assert hooks._read_pending(path) == ["foo", "bar"]
 
 
 # Rollback detection tests
@@ -499,7 +462,7 @@ def test_handle_rollback_success(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", tmp_path / "slot2")
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", tmp_path / "boot")
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", tmp_path / "reinstall")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", tmp_path / "upgrade")
+    monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE_FILE", tmp_path / "upgrade")
 
     result = hooks._handle_rollback()
 
@@ -538,7 +501,7 @@ def test_cleanup_update_state(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "UPDATED_SLOT_NAME", files[2])
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", files[3])
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", files[4])
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", files[5])
+    monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE_FILE", files[5])
 
     hooks._cleanup_update_state()
 
@@ -614,7 +577,7 @@ def test_detect_rollback_cleans_up_on_boot_id_match(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "UPDATE_BOOT_ID", boot_id_file)
     monkeypatch.setattr(hooks, "PRE_UPDATE_WRITABLE_STATUS", state_dir / "pre-status")
     monkeypatch.setattr(hooks, "PENDING_REINSTALL_FILE", state_dir / "reinstall")
-    monkeypatch.setattr(hooks, "PENDING_UPGRADE_FILE", state_dir / "upgrade")
+    monkeypatch.setattr(hooks, "LEGACY_PENDING_UPGRADE_FILE", state_dir / "upgrade")
 
     # Mock boot ID to match
     monkeypatch.setattr(hooks, "_get_current_boot_id", lambda: "abc-123")
