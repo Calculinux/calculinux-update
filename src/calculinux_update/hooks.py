@@ -491,6 +491,9 @@ def run_slot_hook(hook: str, slot: str) -> None:
     else:
         LOG.info("same release and kernel: %d overlay package(s) stay as installed",
                  len(plan.overlay))
+    if plan.journaled:
+        LOG.info("%d journaled base-image removal(s) stay as removed",
+                 len(plan.journaled))
 
     # Overlay files of duplicates are removed and reinstalls happen after reboot
     _write_pending(PENDING_DUPLICATES_FILE, plan.duplicates, "duplicate removal")
@@ -708,6 +711,12 @@ def _remove_duplicate_pkgs(packages: List[str]) -> Tuple[List[str], List[str]]:
             raise
         except Exception as e:
             LOG.warning("error during file restoration: %s", e)
+        # The removals above were journaled into the writable status file by
+        # opkg, but the base image copies stand in again: drop those entries
+        # so the packages report as image-installed.
+        if prune_writable_status(WRITABLE_STATUS, removed):
+            LOG.info("dropped %d journal entr(y/ies) of removed duplicate(s)",
+                     len(removed))
     return removed, failed
 
 

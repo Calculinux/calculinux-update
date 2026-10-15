@@ -8,6 +8,7 @@ from typing import Dict, Iterable, Iterator, List, Set
 
 __all__ = [
     "StatusEntry",
+    "entry_is_removed",
     "load_status_entries",
     "load_status_index",
     "load_package_names",
@@ -85,3 +86,18 @@ def _extract_package(paragraph: str) -> str:
         if line.startswith("Package: "):
             return line.split(": ", 1)[1].strip()
     return ""
+
+
+def entry_is_removed(entry: StatusEntry) -> bool:
+    """True for a status paragraph that records a removal, not an install.
+
+    opkg journals the removal of a base-image package into the writable
+    status file as an entry whose state is ``not-installed``. Such entries
+    are tombstones marking the package removed; they must not be mistaken
+    for installed overlay packages during reconciliation.
+    """
+    for line in entry.raw.splitlines():
+        if line.startswith("Status:"):
+            fields = line.split()
+            return len(fields) >= 4 and fields[3] == "not-installed"
+    return False
