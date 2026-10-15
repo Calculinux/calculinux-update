@@ -302,6 +302,18 @@ class TestRestore:
         ) == 0
         assert overlay.restored == []
 
+    def test_restore_proceeds_despite_removal_journal(self, tmp_path):
+        # opkg's removal journal keeps the removed package in the writable
+        # status file as a not-installed entry; restoring must not mistake
+        # the tombstone for an installed overlay package.
+        status = tmp_path / "status"
+        status.write_text("Package: pkg\nStatus: deinstall ok not-installed\n\n")
+        overlay = FakeOverlay({"/a": UpperInfo(UpperState.WHITEOUT)})
+        assert restore_package_files(
+            "pkg", file_list=["/a"], overlay=overlay, writable_status=status
+        ) == 1
+        assert overlay.restored == ["/a"]
+
     def test_restore_reads_list_when_not_given(self, tmp_path):
         (tmp_path / "pkg.list").write_text("/a\t0100644\t\n")
         overlay = FakeOverlay({"/a": UpperInfo(UpperState.WHITEOUT)})

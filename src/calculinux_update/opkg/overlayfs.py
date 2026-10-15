@@ -33,7 +33,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .status import load_package_names
+from .status import entry_is_removed, load_status_index
 
 LOGGER = logging.getLogger(__name__)
 
@@ -324,12 +324,20 @@ def find_restorable_files(
 def is_package_in_writable_status(
     package_name: str, writable_status: Path = WRITABLE_STATUS
 ) -> bool:
-    """Whether the overlay's own status file still lists the package."""
+    """Whether the overlay's own status file still lists the package as installed.
+
+    Removal journal entries (``not-installed``) do not count: opkg keeps them
+    in the writable status file after ``opkg remove`` of a base-image package,
+    and that is exactly the state file restoration is meant to repair.
+    Counting them here would skip the restore and strand the package reported
+    as image-installed while its files stay hidden behind whiteouts.
+    """
     try:
-        return package_name in load_package_names(writable_status)
+        entry = load_status_index(writable_status).get(package_name)
     except OSError as exc:
         LOGGER.warning("failed to read %s: %s", writable_status, exc)
         return False
+    return entry is not None and not entry_is_removed(entry)
 
 
 def restore_package_files(
