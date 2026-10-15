@@ -7,10 +7,16 @@ installed, every package in the writable status falls in one of these groups:
 - duplicates: also in the new image. Their overlay copy goes away so the
   image's copy wins: a real ``opkg remove`` when files are in the upper layer
   (``duplicates``), only a status prune otherwise (``status_only_duplicates``).
+  A removal that ``opkg remove`` journaled into the writable status file
+  (state ``not-installed``) needs no action at all: the image's files are
+  already hidden by the removal's whiteouts and stay so, and the entry is
+  kept (``journaled``).
 - leaked: image packages opkg copied into the writable status file, not user
   installs; their entries are pruned. They have no files in the upper layer
   and either are in the current image or have no ``.list`` file at all (an
   entry left over from an earlier image; a real install always has one).
+  Journaled removals of packages the new image no longer ships also land
+  here and are pruned as stale.
 - overlay: everything else, i.e. what the user installed on top of the image.
 
 Overlay packages keep working on the new image unless its ABI changed:
@@ -30,8 +36,10 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from .overlayfs import INFO_DIR, OverlayInfo, has_files_in_upper
 from .status import (
+    entry_is_removed,
     load_package_names,
     load_status_entries,
+    load_status_index,
     write_status_entries,
 )
 
@@ -54,6 +62,9 @@ class ReconcilePlan:
     leaked: List[str] = field(default_factory=list)
     overlay: List[str] = field(default_factory=list)
     reinstall: List[str] = field(default_factory=list)
+    # Base-image removals journaled by opkg: the new image still ships these
+    # packages and the removal's whiteouts persist, so nothing is done.
+    journaled: List[str] = field(default_factory=list)
     release_change: bool = False
     kernel_abi: Optional[str] = None
 
@@ -115,7 +126,9 @@ def compute_reconcile_plan(
             upper layer. Prefetch only needs the reinstall list and skips it.
     """
     image_packages = load_package_names(image_status)
-    writable_packages = load_package_names(writable_status)
+    writable_index = load_status_index(writable_status)
+    writable_packages = set(writable_index)
+    journal = {name for name, entry in writable_index.items() if entry_is_removed(entry)}
     current_packages: Set[str] = set()
     if current_status is not None and current_status.exists():
         current_packages = load_package_names(current_status)
@@ -134,6 +147,12 @@ def compute_reconcile_plan(
     with OverlayInfo() as overlay:
         if classify_duplicates:
             for pkg in all_duplicates:
+                if pkg in journal:
+                    # Removal of the image copy recorded by opkg: its
+                    # whiteouts persist across the update, so keep the
+                    # entry and leave the package removed.
+                    plan.journaled.append(pkg)
+                    continue
                 if has_files_in_upper(pkg, overlay):
                     plan.duplicates.append(pkg)
                 else:

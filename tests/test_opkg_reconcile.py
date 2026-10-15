@@ -10,8 +10,13 @@ SAME = {"CALCULINUX_CODENAME": "walnascar", "YOCTO_VERSION": "walnascar"}
 NEXT = {"CALCULINUX_CODENAME": "wrynose", "YOCTO_VERSION": "wrynose"}
 
 
-def write_status(path: Path, packages):
-    chunks = [f"Package: {pkg}\nVersion: 1.0\n" for pkg in packages]
+def write_status(path: Path, packages, removed=frozenset()):
+    chunks = []
+    for pkg in packages:
+        chunk = f"Package: {pkg}\nVersion: 1.0\n"
+        if pkg in removed:
+            chunk += "Status: deinstall ok not-installed\n"
+        chunks.append(chunk)
     path.write_text("\n".join(chunks) + "\n")
 
 
@@ -39,8 +44,11 @@ def statuses(tmp_path):
     new_image = tmp_path / "new"
     writable = tmp_path / "writable"
     current = tmp_path / "current"
-    write_status(new_image, ["base", "moved-in", "busybox", f"kernel-{KABI_OLD}"])
-    write_status(current, ["base", "busybox", "dropped", "user-upgraded", f"kernel-{KABI_OLD}"])
+    write_status(new_image, ["base", "moved-in", "busybox", "hidden-base", f"kernel-{KABI_OLD}"])
+    write_status(
+        current,
+        ["base", "busybox", "dropped", "user-upgraded", "hidden-base", f"kernel-{KABI_OLD}"],
+    )
     write_status(
         writable,
         [
@@ -49,8 +57,10 @@ def statuses(tmp_path):
             "dropped",           # image entry leaked; the new image dropped it
             "user-upgraded",     # image package the user upgraded in the overlay
             "dosbox-x",          # user installed, not in any image
+            "hidden-base",       # base-image package removed by opkg, journaled
             f"kernel-module-rtw89-core-{KABI_OLD}",
         ],
+        removed={"hidden-base"},
     )
     info = tmp_path / "info"
     info.mkdir()
@@ -123,6 +133,33 @@ def test_skipping_duplicate_classification(statuses, upper):
     plan = plan_for(statuses, classify_duplicates=False)
     assert plan.duplicates == [] and plan.status_only_duplicates == []
     assert plan.leaked == ["dropped", "user-upgraded"]
+
+
+def test_journaled_removal_of_still_shipped_package_is_kept(statuses, upper):
+    """A journaled opkg removal of a package the new image still ships keeps
+    its entry: the whiteouts persist, so pruning it would resurrect a phantom
+    installed state with hidden files."""
+    upper.update({"moved-in", "user-upgraded", "dosbox-x"})
+    plan = plan_for(statuses, old_manifest=SAME, new_manifest=SAME)
+
+    assert plan.journaled == ["hidden-base"]
+    assert plan.duplicates == ["moved-in"]
+    assert plan.status_only_duplicates == ["busybox"]
+    assert "hidden-base" not in plan.leaked
+    assert "hidden-base" not in plan.overlay
+    assert "hidden-base" not in plan.reinstall
+
+
+def test_journaled_removal_of_dropped_package_is_pruned(statuses, upper):
+    """A journaled removal of a package the new image no longer ships is
+    stale and is cleaned up with the leaked entries."""
+    new_image, writable, current, info = statuses
+    write_status(new_image, ["base", f"kernel-{KABI_OLD}"])
+    write_status(writable, ["hidden-base"], removed={"hidden-base"})
+
+    plan = plan_for(statuses)
+    assert plan.journaled == []
+    assert plan.leaked == ["hidden-base"]
 
 
 @pytest.mark.parametrize(

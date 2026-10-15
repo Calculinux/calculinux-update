@@ -14,7 +14,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .opkg.conffiles import create_dpkg_new_files, detect_modified_conffiles
 from .opkg.overlayfs import (
@@ -26,7 +26,13 @@ from .opkg.reconcile import (
     compute_reconcile_plan,
     prune_writable_status,
 )
-from .opkg.status import load_package_names, load_status_entries, write_status_entries
+from .opkg.status import (
+    entry_is_removed,
+    load_package_names,
+    load_status_entries,
+    load_status_index,
+    write_status_entries,
+)
 from .prefetch import (
     PREFETCH_CACHE_DIR,
     PREFETCH_LISTS_DIR,
@@ -491,6 +497,9 @@ def run_slot_hook(hook: str, slot: str) -> None:
     else:
         LOG.info("same release and kernel: %d overlay package(s) stay as installed",
                  len(plan.overlay))
+    if plan.journaled:
+        LOG.info("%d journaled base-image removal(s) stay as removed",
+                 len(plan.journaled))
 
     # Overlay files of duplicates are removed and reinstalls happen after reboot
     _write_pending(PENDING_DUPLICATES_FILE, plan.duplicates, "duplicate removal")
@@ -684,6 +693,15 @@ def _reinstall_pkgs(
     return done, failed
 
 
+def _journaled_removals() -> Set[str]:
+    """Packages opkg already journaled as removed (``not-installed`` entries)."""
+    return {
+        name
+        for name, entry in load_status_index(WRITABLE_STATUS).items()
+        if entry_is_removed(entry)
+    }
+
+
 def _remove_duplicate_pkgs(packages: List[str]) -> Tuple[List[str], List[str]]:
     """``opkg remove`` the overlay copies, then restore the image's files."""
     # File lists must be read before opkg deletes them
@@ -693,21 +711,49 @@ def _remove_duplicate_pkgs(packages: List[str]) -> Tuple[List[str], List[str]]:
     if _run_opkg(["remove", "--nodeps", *packages]):
         removed = list(packages)
     else:
+        tombstoned = _journaled_removals()
         for pkg in packages:
-            (removed if _run_opkg(["remove", "--nodeps", pkg]) else failed).append(pkg)
+            if _run_opkg(["remove", "--nodeps", pkg]):
+                removed.append(pkg)
+            elif pkg in tombstoned:
+                # An earlier pass removed the package from opkg but failed to
+                # restore the image's files; opkg has nothing left to remove.
+                LOG.info("%s is already journaled as removed; restoring only", pkg)
+                removed.append(pkg)
+            else:
+                failed.append(pkg)
     if removed:
+        restore_errors: List[str] = []
         try:
-            restored = restore_files_for_packages(
+            restored_count, restore_errors = restore_files_for_packages(
                 removed, file_lists={pkg: file_lists[pkg] for pkg in removed}
             )
             LOG.info(
                 "removed %d overlay duplicate(s); restored %d image file(s)",
-                len(removed), restored,
+                len(removed), restored_count,
             )
         except OverlayIoctlUnsupported:
             raise
         except Exception as e:
             LOG.warning("error during file restoration: %s", e)
+            restore_errors = list(removed)
+        errored = set(restore_errors)
+        if errored:
+            # Those packages' image files are still hidden: keep them queued
+            # with their status entries so the next pass retries them.
+            stuck = [pkg for pkg in removed if pkg in errored]
+            LOG.warning(
+                "%d package(s) await another restoration pass: %s",
+                len(stuck), ", ".join(stuck),
+            )
+            failed.extend(stuck)
+            removed = [pkg for pkg in removed if pkg not in errored]
+        # The removals above were journaled into the writable status file by
+        # opkg, but the base image copies stand in again: drop those entries
+        # so the packages report as image-installed.
+        if removed and prune_writable_status(WRITABLE_STATUS, removed):
+            LOG.info("dropped %d journal entr(y/ies) of removed duplicate(s)",
+                     len(removed))
     return removed, failed
 
 
