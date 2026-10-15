@@ -45,7 +45,10 @@ def statuses(tmp_path):
     writable = tmp_path / "writable"
     current = tmp_path / "current"
     write_status(new_image, ["base", "moved-in", "busybox", "hidden-base", f"kernel-{KABI_OLD}"])
-    write_status(current, ["base", "busybox", "dropped", "user-upgraded", "hidden-base", f"kernel-{KABI_OLD}"])
+    write_status(
+        current,
+        ["base", "busybox", "dropped", "user-upgraded", "hidden-base", f"kernel-{KABI_OLD}"],
+    )
     write_status(
         writable,
         [

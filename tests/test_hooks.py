@@ -157,11 +157,12 @@ def test_duplicates_removed_in_one_batch_then_restored(monkeypatch, state):
     restored = {}
     monkeypatch.setattr(hooks, "_run_opkg", opkg)
     monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [f"/usr/bin/{pkg}"])
-    monkeypatch.setattr(
-        hooks,
-        "restore_files_for_packages",
-        lambda pkgs, file_lists: restored.update(file_lists) or len(pkgs),
-    )
+
+    def fake_restore(pkgs, file_lists):
+        restored.update(file_lists)
+        return len(pkgs), []
+
+    monkeypatch.setattr(hooks, "restore_files_for_packages", fake_restore)
 
     result = hooks.reconcile_pending()
 
@@ -175,13 +176,79 @@ def test_duplicate_removal_falls_back_per_package(monkeypatch, state):
     state.pending_duplicates_file.write_text("good\nbad\n")
     monkeypatch.setattr(hooks, "_run_opkg", Opkg(fail={"bad"}))
     monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
-    monkeypatch.setattr(hooks, "restore_files_for_packages", lambda pkgs, file_lists: 0)
+    monkeypatch.setattr(hooks, "restore_files_for_packages", lambda pkgs, file_lists: (0, []))
 
     result = hooks.reconcile_pending()
 
     assert result.removed == ["good"]
     assert result.failed == ["bad"]
     assert state.pending_duplicates_file.read_text() == "bad\n"
+
+
+def test_partial_restore_keeps_package_queued_and_prunes_rest(monkeypatch, state):
+    state.pending_duplicates_file.write_text("a\nb\n")
+    pruned = {}
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg())
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
+    monkeypatch.setattr(
+        hooks, "restore_files_for_packages", lambda pkgs, file_lists: (2, ["b"])
+    )
+    monkeypatch.setattr(
+        hooks, "prune_writable_status",
+        lambda path, pkgs: pruned.__setitem__("pkgs", list(pkgs)),
+    )
+
+    result = hooks.reconcile_pending()
+
+    assert result.removed == ["a"]
+    assert result.failed == ["b"]
+    assert pruned["pkgs"] == ["a"]
+    assert state.pending_duplicates_file.read_text() == "b\n"
+
+
+def test_restore_exception_keeps_all_queued(monkeypatch, state):
+    state.pending_duplicates_file.write_text("a\nb\n")
+    pruned = {}
+    monkeypatch.setattr(hooks, "_run_opkg", Opkg())
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
+
+    def boom(pkgs, file_lists):
+        raise RuntimeError("ioctl died")
+
+    monkeypatch.setattr(hooks, "restore_files_for_packages", boom)
+    monkeypatch.setattr(
+        hooks, "prune_writable_status",
+        lambda path, pkgs: pruned.__setitem__("pkgs", list(pkgs)),
+    )
+
+    result = hooks.reconcile_pending()
+
+    assert result.removed == []
+    assert result.failed == ["a", "b"]
+    assert "pkgs" not in pruned
+    assert state.pending_duplicates_file.read_text() == "a\nb\n"
+
+
+def test_tombstoned_duplicate_restores_without_remove(monkeypatch, state):
+    state.pending_duplicates_file.write_text("a\n")
+    state.writable_status.write_text("Package: a\nStatus: hold ok not-installed\n\n")
+    opkg = Opkg(fail={"remove"})
+    pruned = {}
+    monkeypatch.setattr(hooks, "_run_opkg", opkg)
+    monkeypatch.setattr(hooks, "get_package_files", lambda pkg: [])
+    monkeypatch.setattr(hooks, "restore_files_for_packages", lambda pkgs, file_lists: (1, []))
+    monkeypatch.setattr(
+        hooks, "prune_writable_status",
+        lambda path, pkgs: pruned.__setitem__("pkgs", list(pkgs)),
+    )
+
+    result = hooks.reconcile_pending()
+
+    assert opkg.calls == [["remove", "--nodeps", "a"], ["remove", "--nodeps", "a"]]
+    assert result.removed == ["a"]
+    assert not result.failed
+    assert pruned["pkgs"] == ["a"]
+    assert not state.pending_duplicates_file.exists()
 
 
 def _prefetched(monkeypatch, state, image_sha=None):

@@ -329,8 +329,9 @@ class TestRestore:
         fake = FakeOverlay({"/a": UpperInfo(UpperState.WHITEOUT)})
         mocker.patch.object(overlayfs, "OverlayInfo", return_value=fake)
         mocker.patch.object(overlayfs, "is_package_in_writable_status", return_value=False)
-        total = restore_files_for_packages(["p1", "p2"], file_lists={"p1": ["/a"]})
+        total, failed = restore_files_for_packages(["p1", "p2"], file_lists={"p1": ["/a"]})
         assert total == 1
+        assert failed == []
         assert fake.restored == ["/a"]
 
     def test_restore_files_for_packages_continues_after_error(self, mocker):
@@ -340,7 +341,7 @@ class TestRestore:
             overlayfs, "restore_opkg_metadata", side_effect=[RuntimeError("boom"), 2]
         )
         mocker.patch.object(overlayfs, "restore_package_files", return_value=1)
-        assert restore_files_for_packages(["bad", "good"]) == 3
+        assert restore_files_for_packages(["bad", "good"]) == (3, ["bad"])
 
     def test_restore_files_for_packages_unsupported_is_fatal(self, mocker):
         mocker.patch.object(overlayfs, "OverlayInfo", return_value=FakeOverlay())

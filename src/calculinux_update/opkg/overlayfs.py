@@ -408,13 +408,18 @@ def restore_files_for_packages(
     package_names: Iterable[str],
     dry_run: bool = False,
     file_lists: Optional[Dict[str, List[str]]] = None,
-) -> int:
+) -> Tuple[int, List[str]]:
     """Restore metadata and files for several removed packages.
+
+    Returns the number of restored files and the names of the packages whose
+    restoration raised an error. Those packages still hide the image's files,
+    so their status entries must be kept and the restoration retried.
 
     Metadata goes first so the image's file list is readable when no list was
     captured before the removal.
     """
     total = 0
+    failed: List[str] = []
     with OverlayInfo() as overlay:
         for package_name in package_names:
             try:
@@ -427,4 +432,5 @@ def restore_files_for_packages(
                 raise
             except Exception as exc:
                 LOGGER.error("error restoring files for package %s: %s", package_name, exc)
-    return total
+                failed.append(package_name)
+    return total, failed
